@@ -17,8 +17,10 @@ PUBLIC_CONFIG_KEYS = {"schema_version", "repository", "team_id", "keychain_acces
                       "app_bundle_id", "provider_bundle_id", "app_group_id"}
 PRIVATE_DOCUMENT_STEMS = {"plan", "plans", "planning", "todo", "notes", "agents", "glossary"}
 PRIVATE_KEY_NAMES = re.compile(r"(?:^|[-_.])(?:private[-_]?key|signing[-_]?key|update[-_]?key|api[-_]?key|credentials?|secrets?)(?:[-_.]|$)", re.I)
-SECRET_JSON_FIELDS = {"password", "passwd", "token", "api_key", "apikey", "access_token", "refresh_token",
-                      "client_secret", "private_key", "signing_key", "update_key", "certificate_password"}
+SECRET_JSON_FIELDS = {"password", "passwd", "token", "secret", "secret_key", "api_key", "apikey", "access_token",
+                      "refresh_token", "client_secret", "private_key", "signing_key", "update_key", "certificate_password",
+                      "mydrive_certificate_p12_base64", "mydrive_certificate_password", "mydrive_host_profile_base64",
+                      "mydrive_provider_profile_base64", "mydrive_sparkle_private_key", "mydrive_notary_key_base64"}
 SECRET_PATTERNS = [
     (re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"), "private key material"),
     (re.compile(rb"\b(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{40,})\b"), "GitHub token"),

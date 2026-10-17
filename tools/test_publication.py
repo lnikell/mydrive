@@ -28,6 +28,8 @@ class PublicationTests(unittest.TestCase):
     def test_gitignore_keeps_local_docs_and_signing_data_out_of_add_all(self):
         private = ["docs/research/design.md", "docs/adr/decision.md", "docs/implementation-progress.md", "docs/future-plan.md",
                    "AGENTS.md", "GLOSSARY.md", ".agents/skills/release/SKILL.md", ".local/nas-test.json",
+                   "nested/plans/experiment.txt", "nested/research/notes.html", "nested/adr/decision.txt",
+                   "nested/.agents/skills/local/SKILL.md", "nested/AGENTS.md", "nested/architecture-review-1.html",
                    "signing.p12", "AuthKey.p8", ".env.local", "update-key", "secrets.json", "PLAN.txt", "notes.html",
                    "dist/MyDrive.app/executable", "Transport/target/helper"]
         public = ["README.md", "docs/releasing.md", "release/notes/0.2.0.md", "MacApp/File.swift"]
@@ -74,7 +76,8 @@ class PublicationTests(unittest.TestCase):
     def test_nested_json_credentials_are_rejected_without_echoing_the_value(self):
         import json
         value = "synthetic-do-not-echo"
-        for field in publication.SECRET_JSON_FIELDS:
+        for field in ("password", "api_key", "client_secret", "MYDRIVE_SPARKLE_PRIVATE_KEY",
+                      "MYDRIVE_CERTIFICATE_P12_BASE64", "MYDRIVE_CERTIFICATE_PASSWORD", "MYDRIVE_NOTARY_KEY_BASE64"):
             result = publication.findings("config/service.json", json.dumps({"accounts": [{field: value}]}).encode())
             self.assertEqual(result, [(None, "populated credential field in JSON")])
             self.assertNotIn(value, str(result))

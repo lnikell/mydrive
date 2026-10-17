@@ -65,19 +65,20 @@ secrets.json
 # Release instructions are the only public file under docs by default.
 /docs/*
 !/docs/releasing.md
-/AGENTS.md
-/GLOSSARY.md
-/.agents/
-/.codex/
-/.claude/
-/plans/
-/planning/
-/research/
+AGENTS.md
+GLOSSARY.md
+.agents/
+.codex/
+.claude/
+plans/
+planning/
+research/
+adr/
 /PLAN.md
 /PLANS.md
 /TODO.md
 /NOTES.md
-/architecture-review-*.html
+architecture-review-*.html
 # Local notes remain private when saved in another format.
 [Pp][Ll][Aa][Nn].*
 [Pp][Ll][Aa][Nn][Ss].*
