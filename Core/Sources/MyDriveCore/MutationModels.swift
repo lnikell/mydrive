@@ -82,6 +82,10 @@ struct MutationFingerprint {
         add(entry.name); add(entry.kind.rawValue); add(entry.remoteKey)
         add(entry.contentVersion); add(entry.metadataVersion); add(String(entry.size))
         add(entry.modifiedAt.map { String($0.timeIntervalSince1970.bitPattern) })
+        // Leave the legacy nil encoding unchanged for already-durable intents.
+        if let identity = entry.objectIdentity {
+            add("objectIdentity"); add(String(identity.indexNumber)); add(String(identity.createdFiletime))
+        }
     }
 
     var digest: String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }

@@ -148,15 +148,19 @@ extension Catalog {
         let entry = value.entry
         try database.execute("""
             INSERT INTO items(id, parent_id, name, kind, remote_key, content_version, metadata_version,
-                              size, modified_at, is_deleted)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                              size, modified_at, is_deleted, object_index_number, object_created_filetime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
             ON CONFLICT(id) DO UPDATE SET parent_id = excluded.parent_id, name = excluded.name,
                 kind = excluded.kind, remote_key = excluded.remote_key, content_version = excluded.content_version,
                 metadata_version = excluded.metadata_version, size = excluded.size,
-                modified_at = excluded.modified_at, is_deleted = 0
+                modified_at = excluded.modified_at, is_deleted = 0,
+                object_index_number = excluded.object_index_number,
+                object_created_filetime = excluded.object_created_filetime
             """, [.text(value.id), .text(value.parentID), .text(entry.name), .text(entry.kind.rawValue),
                   SQLValue(entry.remoteKey), .text(entry.contentVersion), .text(entry.metadataVersion),
-                  .integer(entry.size), SQLValue(entry.modifiedAt)])
+                  .integer(entry.size), SQLValue(entry.modifiedAt),
+                  SQLValue(entry.objectIdentity.map { String($0.indexNumber) }),
+                  SQLValue(entry.objectIdentity.map { String($0.createdFiletime) })])
     }
 
     private func invalidateMutationScans(upserts: [CatalogMutationItem], tombstones: [String]) throws {

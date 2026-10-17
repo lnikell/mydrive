@@ -4,8 +4,8 @@ extension SQLiteConnection {
     func migrate() throws {
         try transaction {
             let version = try scalarInt("PRAGMA user_version")
-            guard (0...4).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
-            guard version != 4 else { return }
+            guard (0...5).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
+            guard version != 5 else { return }
             if version == 1 {
                 try script("""
                     CREATE TABLE IF NOT EXISTS observed_directories (item_id TEXT PRIMARY KEY REFERENCES items(id));
@@ -76,8 +76,9 @@ extension SQLiteConnection {
             // Version 3 was the first incremental feed. Keep its item-scoped
             // lookup indexed when migrating an already-created feed database.
             try execute("CREATE INDEX IF NOT EXISTS changes_item ON catalog_changes(item_id, sequence)")
-            try migrateWritableJournal()
-            try execute("PRAGMA user_version = 4")
+            if version < 4 { try migrateWritableJournal() }
+            try migrateObjectIdentity()
+            try execute("PRAGMA user_version = 5")
         }
     }
 }

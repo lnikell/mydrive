@@ -20,6 +20,18 @@ public enum ItemKind: String, Codable, Sendable {
     case file, directory, symbolicLink
 }
 
+/// A server object observation, independent of opaque content/metadata versions.
+/// The creation value distinguishes reused object numbers at the same pathname.
+public struct RemoteObjectIdentity: Codable, Equatable, Sendable {
+    public let indexNumber: UInt64
+    public let createdFiletime: UInt64
+
+    public init(indexNumber: UInt64, createdFiletime: UInt64) {
+        self.indexNumber = indexNumber
+        self.createdFiletime = createdFiletime
+    }
+}
+
 /// A listing observation. A remote key must be unique per directory entry across
 /// the share and stable across renames/reconnects. Omit it without that guarantee,
 /// including when a server reuses one object identifier for multiple hard links.
@@ -31,11 +43,12 @@ public struct RemoteEntry: Codable, Equatable, Sendable {
     public let metadataVersion: String
     public let size: Int64
     public let modifiedAt: Date?
+    public let objectIdentity: RemoteObjectIdentity?
 
     public init(
         name: String, kind: ItemKind, remoteKey: String? = nil,
         contentVersion: String, metadataVersion: String,
-        size: Int64 = 0, modifiedAt: Date? = nil
+        size: Int64 = 0, modifiedAt: Date? = nil, objectIdentity: RemoteObjectIdentity? = nil
     ) {
         self.name = name
         self.kind = kind
@@ -44,6 +57,7 @@ public struct RemoteEntry: Codable, Equatable, Sendable {
         self.metadataVersion = metadataVersion
         self.size = size
         self.modifiedAt = modifiedAt
+        self.objectIdentity = objectIdentity
     }
 }
 

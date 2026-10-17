@@ -249,17 +249,25 @@ public actor Catalog {
         }
     }
 
-    static let itemColumns = "id, parent_id, name, kind, remote_key, content_version, metadata_version, size, modified_at, is_deleted"
+    static let itemColumns = "id, parent_id, name, kind, remote_key, content_version, metadata_version, size, modified_at, is_deleted, object_index_number, object_created_filetime"
 
     static func decodeItem(_ statement: SQLStatement) throws -> CatalogItem {
         guard let kind = ItemKind(rawValue: statement.text(3)) else { throw CatalogError.invalidEntry }
         let modified = statement.isNull(8) ? nil : Date(timeIntervalSince1970: statement.real(8))
+        let identity: RemoteObjectIdentity?
+        if statement.isNull(10), statement.isNull(11) { identity = nil }
+        else {
+            guard let index = UInt64(statement.text(10)), let created = UInt64(statement.text(11)) else {
+                throw CatalogError.invalidEntry
+            }
+            identity = RemoteObjectIdentity(indexNumber: index, createdFiletime: created)
+        }
         return CatalogItem(
             id: statement.text(0), parentID: statement.optionalText(1),
             entry: RemoteEntry(
                 name: statement.text(2), kind: kind, remoteKey: statement.optionalText(4),
                 contentVersion: statement.text(5), metadataVersion: statement.text(6),
-                size: statement.integer(7), modifiedAt: modified),
+                size: statement.integer(7), modifiedAt: modified, objectIdentity: identity),
             isDeleted: statement.integer(9) != 0)
     }
 }
