@@ -63,6 +63,10 @@ extension JournalIntent {
         fields.add(destinationPath)
         fields.add(baseEntry)
         if let deletionContextID { fields.add("deletionContext"); fields.add(deletionContextID) }
+        if let tree {
+            fields.add("tree-v1"); fields.add(String(tree.nodeCount))
+            fields.add(String(tree.totalBytes)); fields.add(tree.sha256)
+        }
         return fields.digest
     }
 }

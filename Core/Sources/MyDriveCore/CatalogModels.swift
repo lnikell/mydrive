@@ -139,13 +139,15 @@ public struct JournalIntent: Codable, Equatable, Sendable {
     public let destinationPath: String?
     public let baseEntry: RemoteEntry?
     public let deletionContextID: String?
+    public let tree: StagedTreeReference?
 
     public init(
         idempotencyKey: UUID = UUID(), itemID: String,
         expectedVersion: String?, action: JournalAction,
         expectedMetadataVersion: String? = nil, payload: StagedPayload? = nil,
         createTemplateID: String? = nil, sourcePath: String? = nil,
-        destinationPath: String? = nil, baseEntry: RemoteEntry? = nil, deletionContextID: String? = nil
+        destinationPath: String? = nil, baseEntry: RemoteEntry? = nil, deletionContextID: String? = nil,
+        tree: StagedTreeReference? = nil
     ) {
         self.idempotencyKey = idempotencyKey
         self.itemID = itemID
@@ -158,6 +160,7 @@ public struct JournalIntent: Codable, Equatable, Sendable {
         self.destinationPath = destinationPath
         self.baseEntry = baseEntry
         self.deletionContextID = deletionContextID
+        self.tree = tree
     }
 }
 

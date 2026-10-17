@@ -17,6 +17,12 @@ extension Catalog {
 
     /// Only the recursive manifest boundary may qualify a retired snapshot.
     func enqueueInTransaction(_ intent: JournalIntent, allowRetiredDelete: Bool = false) throws -> JournalOperation {
+        if let existing = try matchingOperation(intent) { return existing }
+        try validateIntent(intent, allowRetiredDelete: allowRetiredDelete)
+        return try insertQualifiedOperation(intent)
+    }
+
+    func matchingOperation(_ intent: JournalIntent) throws -> JournalOperation? {
         if let existing = try operation(key: intent.idempotencyKey) {
             guard existing.intent.requestFingerprint == intent.requestFingerprint else {
                 throw CatalogError.idempotencyConflict
@@ -24,7 +30,12 @@ extension Catalog {
             return existing
         }
         if let existing = try operation(requestFingerprint: intent.requestFingerprint) { return existing }
-        try validateIntent(intent, allowRetiredDelete: allowRetiredDelete)
+        return nil
+    }
+
+    /// Caller has qualified authority in the owning Catalog transaction. Private
+    /// tree children use their frozen manifest instead of live Catalog parents.
+    func insertQualifiedOperation(_ intent: JournalIntent) throws -> JournalOperation {
         let encoded = try JSONEncoder().encode(intent)
         guard encoded.count <= 131_072 else { throw CatalogError.invalidEntry }
         let json = String(decoding: encoded, as: UTF8.self)
@@ -105,6 +116,7 @@ extension Catalog {
     }
 
     private func validateIntent(_ intent: JournalIntent, allowRetiredDelete: Bool = false) throws {
+        guard intent.tree == nil else { throw CatalogError.invalidEntry }
         guard intent.itemID != Self.rootID else { throw CatalogError.invalidTransition }
         try Self.validateMutationID(intent.itemID)
         if let path = intent.sourcePath { try Self.validateMutationPath(path) }

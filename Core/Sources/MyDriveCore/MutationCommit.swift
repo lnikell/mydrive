@@ -21,6 +21,9 @@ extension Catalog {
         let fingerprint = Self.commitFingerprint(upserts: upserts, tombstones: tombstones)
         return try database.transaction {
             guard let operation = try operation(key: key) else { throw CatalogError.invalidTransition }
+            guard operation.intent.tree == nil, try importOwnerKey(key) == nil else {
+                throw CatalogError.invalidTransition
+            }
             if let result = try mutationResult(key: key) {
                 let original = try database.scalarText(
                     "SELECT commit_fingerprint FROM operations WHERE idempotency_key = ?", [.text(key.uuidString)])
@@ -153,7 +156,7 @@ extension Catalog {
         try database.execute("UPDATE items SET remote_key = NULL WHERE id = ?", [.text(owner)])
     }
 
-    private func publishMutation(_ value: CatalogMutationItem) throws {
+    func publishMutation(_ value: CatalogMutationItem) throws {
         let entry = value.entry
         try database.execute("""
             INSERT INTO items(id, parent_id, name, kind, remote_key, content_version, metadata_version,

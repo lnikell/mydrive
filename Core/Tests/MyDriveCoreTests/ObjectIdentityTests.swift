@@ -48,7 +48,7 @@ import Testing
         let db = try SQLiteConnection(url: fixture.url, cacheKiB: 2_048)
         #expect(try db.scalarText("SELECT object_index_number FROM items WHERE id = ?", [.text(item.id)]) == "18446744073709551615")
         #expect(try db.scalarText("SELECT typeof(object_created_filetime) FROM items WHERE id = ?", [.text(item.id)]) == "text")
-        #expect(try db.scalarInt("PRAGMA user_version") == 6)
+        #expect(try db.scalarInt("PRAGMA user_version") == 7)
     }
 
     @Test func identityAdoptionPublishesOnceAndMissingLegacyMetadataCannotEraseIt() async throws {
@@ -165,7 +165,7 @@ import Testing
         let migrated = try Catalog(databaseURL: path)
         #expect(try await migrated.item(id: "old")?.entry.objectIdentity == nil)
         #expect(try db.scalarText("SELECT state FROM operations") == "uncertain")
-        #expect(try db.scalarInt("PRAGMA user_version") == 6)
+        #expect(try db.scalarInt("PRAGMA user_version") == 7)
         try await migrated.completeScan(.init(id: "pending-scan", parentID: Catalog.rootID))
         #expect(try await migrated.child(named: "file", in: Catalog.rootID)?.id == "old")
         #expect(try await migrated.generation() == 4)
