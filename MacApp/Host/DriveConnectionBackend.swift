@@ -34,10 +34,11 @@ enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offl
         #if MYDRIVE_DEVELOPMENT
         if AppStorage.isDevelopmentStorage {
             try DevelopmentConnectionScope.validate(settings)
-            if try await !registeredDomainIDs().contains(settings.domainID) { try await management.register() }
-            try Task.checkCancellation()
-            try await management.useDevelopmentCredential(password)
-            try await management.connectionRestored()
+            try await Self.activateDevelopment(
+                isRegistered: { try await registeredDomainIDs().contains(settings.domainID) },
+                register: { try await management.register(hidden: $0) },
+                installCredential: { try await management.useDevelopmentCredential(password) },
+                connectionRestored: { try await management.connectionRestored() })
             return
         }
         #endif
@@ -48,6 +49,31 @@ enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offl
         try await management.connectionRestored()
     }
 
+    #if MYDRIVE_DEVELOPMENT
+    /// The provider owns development credentials, so a new location must stay
+    /// hidden until that same domain has confirmed it can enumerate the NAS.
+    /// Side effects are injected only at this internal lifecycle test seam.
+    static func activateDevelopment(
+        isRegistered: () async throws -> Bool,
+        register: (Bool) async throws -> Void,
+        installCredential: () async throws -> Void,
+        connectionRestored: () async throws -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        let registered = try await isRegistered()
+        try Task.checkCancellation()
+        if !registered { try await register(true) }
+        try Task.checkCancellation()
+        try await installCredential()
+        try Task.checkCancellation()
+        try await connectionRestored()
+        try Task.checkCancellation()
+        // Re-adding the same ID also reveals a hidden registration whose prior
+        // activation failed. A failure above never publishes an unready drive.
+        try await register(false)
+    }
+    #endif
+
     func perform(_ action: DriveAction, settings: ConnectionSettings) async throws -> String {
         let management = DomainManagement(settings: settings)
         switch action {
@@ -55,7 +81,12 @@ enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offl
             try await management.refresh()
             return "Refreshed known folders."
         case .openFinder:
-            guard NSWorkspace.shared.open(try await management.rootURL()) else { throw CocoaError(.fileReadUnknown) }
+            let url = try await management.rootURL()
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            guard NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.path) else {
+                throw CocoaError(.fileReadUnknown, userInfo: [NSLocalizedDescriptionKey: "Finder could not open this drive."])
+            }
             return ""
         case .keepSelected:
             let items = try await management.selectItems()

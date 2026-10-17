@@ -173,5 +173,77 @@ private struct DriveTestFailure: LocalizedError {
                   "Cancelled startup could not retry")
         await retryModel.shutdown()
         print("PASS cancelled startup retries registration instead of caching a false disconnected state")
+
+        #if MYDRIVE_DEVELOPMENT
+        try await developmentRegistration()
+        #endif
     }
+
+    #if MYDRIVE_DEVELOPMENT
+    @MainActor private static func developmentRegistration() async throws {
+        var effects: [String] = []
+        var registered = false
+        var hidden = false
+        var failInstall = false, failRefresh = false, failReveal = false
+        var cancelAfterHidden: (() -> Void)?
+        func activate() async throws {
+            try await SystemDriveConnectionBackend.activateDevelopment(
+                isRegistered: { effects.append("lookup"); return registered },
+                register: { value in
+                    effects.append(value ? "hidden" : "visible")
+                    if !value && failReveal { throw DriveTestFailure(message: "Reveal refused") }
+                    registered = true; hidden = value
+                    if value { cancelAfterHidden?() }
+                },
+                installCredential: {
+                    effects.append("credential")
+                    if failInstall { throw DriveTestFailure(message: "Credential refused") }
+                },
+                connectionRestored: {
+                    effects.append("refresh")
+                    if failRefresh { throw DriveTestFailure(message: "Refresh refused") }
+                })
+        }
+        try await activate()
+        try check(effects == ["lookup", "hidden", "credential", "refresh", "visible"] && registered && !hidden,
+                  "New development domain became visible before verified provider access")
+        print("PASS development registration hides a new domain until credentials and provider refresh succeed")
+
+        for phase in ["credential", "refresh", "visible"] {
+            effects = []; registered = false; hidden = false
+            failInstall = phase == "credential"; failRefresh = phase == "refresh"; failReveal = phase == "visible"
+            do { try await activate(); throw DriveTestFailure(message: "Failed activation reported success") }
+            catch let error as DriveTestFailure where error.message.hasSuffix("refused") { }
+            let expected = phase == "credential" ? ["lookup", "hidden", "credential"] :
+                phase == "refresh" ? ["lookup", "hidden", "credential", "refresh"] :
+                ["lookup", "hidden", "credential", "refresh", "visible"]
+            try check(effects == expected && registered && hidden, "Failed activation exposed or abandoned its hidden registration")
+            effects = []; failInstall = false; failRefresh = false; failReveal = false
+            try await activate()
+            try check(effects == ["lookup", "credential", "refresh", "visible"] && !hidden,
+                      "Retry failed to reveal the same prior hidden domain without re-registering it hidden")
+        }
+        print("PASS credential, refresh and reveal failures preserve a hidden registration that same-ID retry can finish")
+
+        effects = []
+        try await activate()
+        try check(effects == ["lookup", "credential", "refresh", "visible"] && !hidden,
+                  "Reconnect hid an already registered development domain")
+        effects = []; registered = false; hidden = false
+        let cancelled = Task { @MainActor in
+            cancelAfterHidden = { withUnsafeCurrentTask { $0?.cancel() } }
+            try await activate()
+        }
+        do { try await cancelled.value; throw DriveTestFailure(message: "Cancelled activation succeeded") }
+        catch is CancellationError { }
+        cancelAfterHidden = nil
+        try check(effects == ["lookup", "hidden"] && registered && hidden,
+                  "Cancellation after hidden registration installed credentials or revealed the domain")
+        effects = []
+        try await activate()
+        try check(effects == ["lookup", "credential", "refresh", "visible"] && !hidden,
+                  "A fresh retry could not finish a cancelled hidden registration")
+        print("PASS reconnect never hides an existing drive; cancellation stops before credentials and supports fresh retry")
+    }
+    #endif
 }

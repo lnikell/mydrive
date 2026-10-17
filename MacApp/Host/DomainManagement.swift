@@ -19,8 +19,10 @@ struct ConnectionRemoval {
 
     init(settings: ConnectionSettings) { self.settings = settings }
 
-    func register() async throws {
-        try await NSFileProviderManager.add(domain)
+    func register(hidden: Bool = false) async throws {
+        let requested = domain
+        requested.isHidden = hidden
+        try await NSFileProviderManager.add(requested)
     }
 
     /// A provider refresh must confirm its own credential and connection work;
