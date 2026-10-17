@@ -99,7 +99,7 @@ extension Catalog {
                      OR object_created_filetime = '0'))
                 """, [.text(scan.id)])
             guard unsafe == 0 else { throw CatalogError.invalidEntry }
-            _ = try completeScanInTransaction(scan)
+            _ = try completeScanInTransaction(scan, directory: directory)
             var added: Int64 = 0
             try database.statement("""
                 SELECT \(Self.itemColumns) FROM items WHERE parent_id = ? AND is_deleted = 0 ORDER BY id

@@ -7,7 +7,8 @@ extension Catalog {
         try database.transaction {
             try requireDirectory(parentID)
             try database.execute("DELETE FROM scans WHERE parent_id = ?", [.text(parentID)])
-            let scan = CatalogScan(id: UUID().uuidString, parentID: parentID)
+            let scan = CatalogScan(id: UUID().uuidString, parentID: parentID,
+                                   directory: try item(id: parentID), path: try relativePath(id: parentID))
             try database.execute("INSERT INTO scans(id, parent_id) VALUES (?, ?)", [.text(scan.id), .text(parentID)])
             return scan
         }
@@ -48,17 +49,18 @@ extension Catalog {
     /// same path, including atomic saves. Replaced directories get fresh IDs so
     /// their former descendant graph and offline selections cannot be adopted.
     @discardableResult
-    public func completeScan(_ scan: CatalogScan) throws -> Int64 {
+    public func completeScan(_ scan: CatalogScan, directory: RemoteEntry? = nil) throws -> Int64 {
         try database.transaction {
-            try completeScanInTransaction(scan)
+            try completeScanInTransaction(scan, directory: directory)
         }
     }
 
     /// Shared by normal publication and qualified recursive inventory capture.
     /// Caller owns the SQLite transaction; no network work occurs in this body.
-    func completeScanInTransaction(_ scan: CatalogScan) throws -> Int64 {
+    func completeScanInTransaction(_ scan: CatalogScan, directory: RemoteEntry? = nil) throws -> Int64 {
         try requireScan(scan)
         try requireDirectory(scan.parentID)
+        let directoryChanged = try publishScannedDirectory(directory, for: scan)
         // Files retain the logical Finder ID after a remote atomic save so a
         // pending local edit can reach conflict preservation. Directory identity
         // enrichment requires an unchanged opaque version; changed/replaced
@@ -91,6 +93,9 @@ extension Catalog {
         try database.execute("INSERT OR IGNORE INTO observed_directories(item_id) VALUES (?)", [.text(scan.parentID)])
         if try !hasChanges(scan) {
             try database.execute("DELETE FROM scans WHERE id = ?", [.text(scan.id)])
+            if directoryChanged {
+                try database.execute("UPDATE catalog_state SET generation = generation + 1 WHERE singleton = 1")
+            }
             return try database.scalarInt("SELECT generation FROM catalog_state WHERE singleton = 1")
     }
     try database.execute("""
@@ -129,6 +134,34 @@ extension Catalog {
             try requireScan(scan)
             try database.execute("DELETE FROM scans WHERE id = ?", [.text(scan.id)])
         }
+    }
+
+    /// The terminal observation comes from the actual held listing handle.
+    /// Refresh only mutable metadata of that same frozen directory. Names,
+    /// ancestry, identity, stable remote keys and offline selection stay owned
+    /// by their existing publication paths; the synthetic root is never remote.
+    private func publishScannedDirectory(_ directory: RemoteEntry?, for scan: CatalogScan) throws -> Bool {
+        guard let directory, scan.parentID != Self.rootID else { return false }
+        try Self.validateMutationEntry(directory)
+        guard let frozen = scan.directory, !frozen.isDeleted, frozen.entry.kind == .directory,
+              let identity = frozen.entry.objectIdentity, identity.indexNumber != 0, identity.createdFiletime != 0,
+              directory.kind == .directory, directory.objectIdentity == identity,
+              Self.exact(directory.name, frozen.entry.name),
+              let live = try item(id: scan.parentID), !live.isDeleted, live.entry.kind == .directory,
+              live.entry.objectIdentity == identity, Self.exact(live.entry.name, frozen.entry.name),
+              let frozenParent = frozen.parentID, let liveParent = live.parentID, Self.exact(frozenParent, liveParent),
+              let frozenPath = scan.path, let livePath = try relativePath(id: scan.parentID),
+              Self.exact(frozenPath, livePath) else { throw CatalogError.invalidParent }
+        let changed = !Self.exact(live.entry.contentVersion, directory.contentVersion)
+            || !Self.exact(live.entry.metadataVersion, directory.metadataVersion)
+            || live.entry.size != directory.size || live.entry.modifiedAt != directory.modifiedAt
+        if changed {
+            try database.execute("""
+                UPDATE items SET content_version = ?, metadata_version = ?, size = ?, modified_at = ? WHERE id = ?
+                """, [.text(directory.contentVersion), .text(directory.metadataVersion), .integer(directory.size),
+                      SQLValue(directory.modifiedAt), .text(scan.parentID)])
+        }
+        return changed
     }
 
     private func requireScan(_ scan: CatalogScan) throws {

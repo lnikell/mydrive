@@ -86,6 +86,13 @@ public enum ConnectionState: String, Sendable {
 public struct CatalogScan: Equatable, Sendable {
     public let id: String
     public let parentID: String
+    let directory: CatalogItem?
+    let path: String?
+
+    init(id: String, parentID: String, directory: CatalogItem? = nil, path: String? = nil) {
+        self.id = id; self.parentID = parentID
+        self.directory = directory; self.path = path
+    }
 }
 
 /// Valid only for one parent and one committed catalog generation. A changed
