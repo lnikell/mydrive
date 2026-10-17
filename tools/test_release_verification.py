@@ -14,7 +14,7 @@ import zipfile
 
 import release
 from release_github import GitHub
-from release_support import ReleaseError, SPARKLE, validate_manifest
+from release_support import ReleaseError, SPARKLE, MANIFEST_SCHEMA, release_compatibility, validate_manifest
 
 
 CONFIG = dict(schema_version=1, repository="example/MyDrive", team_id="ABC1234567",
@@ -223,7 +223,8 @@ class LatestRelease(GitHub):
     """A read-only server adapter; any attempted publication fails the test."""
     def __init__(self, previous):
         super().__init__(CONFIG["repository"])
-        self.previous = dict(previous, repository=self.repository)
+        self.previous = dict(previous, schema_version=MANIFEST_SCHEMA, repository=self.repository,
+                             tag="v" + previous["version"], architecture="arm64", compatibility=release_compatibility(CONFIG))
 
     def api(self, path, *, method="GET", **kwargs):
         if method != "GET":
@@ -244,13 +245,14 @@ class LatestRelease(GitHub):
 class ReleaseOrderingTests(unittest.TestCase):
     def test_increased_build_cannot_publish_an_older_version(self):
         candidate = dict(repository=CONFIG["repository"], version="0.1.9", build="99",
-                         tag="v0.1.9", commit=COMMIT)
+                         tag="v0.1.9", commit=COMMIT, schema_version=MANIFEST_SCHEMA, compatibility=release_compatibility(CONFIG))
         with tempfile.TemporaryDirectory() as temporary, self.assertRaisesRegex(ReleaseError, "both version and build"):
             LatestRelease({"version": "0.2.0", "build": "2"}).publish(Path(temporary), candidate, "Notes")
 
     def test_version_comparison_is_numeric_and_build_must_also_increase(self):
         github = LatestRelease({"version": "0.9.0", "build": "9"})
-        candidate = dict(repository=CONFIG["repository"], version="0.10.0", build="10", tag="v0.10.0")
+        candidate = dict(repository=CONFIG["repository"], version="0.10.0", build="10", tag="v0.10.0",
+                         schema_version=MANIFEST_SCHEMA, compatibility=release_compatibility(CONFIG))
         github.check_newer(candidate)
         for changes in ({"version": "0.9.0"}, {"build": "9"}):
             with self.subTest(changes=changes), self.assertRaises(ReleaseError):

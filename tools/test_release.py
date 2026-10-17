@@ -9,8 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from release_github import GitHub
-from release_support import (SPARKLE, ReleaseError, artifact_records, configuration_problems,
-                             digest, validate_manifest, version_info)
+from release_support import (SPARKLE, MANIFEST_SCHEMA, ReleaseError, artifact_records, configuration_problems,
+                             digest, release_compatibility, validate_manifest, version_info)
 
 
 CONFIG = dict(schema_version=1, repository="example/MyDrive", team_id="ABC1234567",
@@ -32,8 +32,9 @@ def fixture(folder):
 <enclosure url="https://github.com/example/MyDrive/releases/download/v0.2.0/MyDrive-0.2.0-arm64.zip"
  length="18" sparkle:edSignature="{base64.b64encode(b's' * 64).decode()}"/>
 </item></channel></rss>''')
-    manifest = dict(schema_version=1, repository=CONFIG["repository"], version="0.2.0", build="2",
-                    tag="v0.2.0", commit="a" * 40, architecture="arm64", artifacts=artifact_records(folder))
+    manifest = dict(schema_version=MANIFEST_SCHEMA, repository=CONFIG["repository"], version="0.2.0", build="2",
+                    tag="v0.2.0", commit="a" * 40, architecture="arm64", compatibility=release_compatibility(CONFIG),
+                    artifacts=artifact_records(folder))
     (folder / "release-manifest.json").write_text(json.dumps(manifest))
     return manifest
 
@@ -55,6 +56,7 @@ class FakeGitHub(GitHub):
         self.tag_object = None
         self.annotated = {}
         self.tag_reads = []
+        self.latest_manifest = None
 
     def api(self, path, *, method="GET", body=None, missing_ok=False):
         prefix = "repos/" + self.repository
@@ -91,6 +93,9 @@ class FakeGitHub(GitHub):
                                           digest="sha256:" + digest(path)))
 
     def asset_bytes(self, asset, destination):
+        if self.latest_manifest is not None and asset["name"] == "release-manifest.json":
+            destination.write_text(json.dumps(self.latest_manifest))
+            return
         destination.write_bytes((self.folder / asset["name"]).read_bytes())
 
 
@@ -157,7 +162,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_corrupt_existing_asset_stops_before_any_upload_or_publish(self):
         github = FakeGitHub(self.folder, self.manifest)
-        github.release = dict(id=42, draft=True, prerelease=False, assets=[dict(
+        github.release = dict(id=42, tag_name=self.manifest["tag"], draft=True, prerelease=False, assets=[dict(
             name="appcast.xml", state="uploaded", size=(self.folder / "appcast.xml").stat().st_size,
             digest="sha256:" + "0" * 64)])
         with self.assertRaisesRegex(ReleaseError, "differs"):
@@ -167,7 +172,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_public_incomplete_release_is_never_repaired_implicitly(self):
         github = FakeGitHub(self.folder, self.manifest)
-        github.release = dict(id=42, draft=False, prerelease=False, assets=[])
+        github.release = dict(id=42, tag_name=self.manifest["tag"], draft=False, prerelease=False, assets=[])
         with self.assertRaisesRegex(ReleaseError, "never changed"):
             github.publish(self.folder, self.manifest, "Notes")
         self.assertEqual(github.uploads, [])
@@ -243,7 +248,7 @@ class ReleaseTests(unittest.TestCase):
 
     def test_incomplete_starter_asset_stays_untouched_with_recovery_message(self):
         github = FakeGitHub(self.folder, self.manifest)
-        github.release = dict(id=42, draft=True, prerelease=False, assets=[dict(
+        github.release = dict(id=42, tag_name=self.manifest["tag"], draft=True, prerelease=False, assets=[dict(
             name="appcast.xml", state="starter", size=0)])
         with self.assertRaisesRegex(ReleaseError, "Inspect its release.*original prepared"):
             github.publish(self.folder, self.manifest, "Notes")

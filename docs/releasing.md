@@ -40,6 +40,8 @@ python3 tools/release.py ship
 
 `ship` requires a clean checkout at the exact version tag. For a new release, it runs the publication guard and local test suite, builds in an isolated workspace, validates both provisioning profiles, signs the app and extension, notarizes, staples, archives, signs the Sparkle feed, re-extracts/verifies the app, and uploads a draft release. It checks immutable asset hashes and makes the release public only after all assets are verified. Development builds are never official releases. No NAS credentials are needed for these checks.
 
+The release manifest records the signing team, bundle identifiers, App Group, shared Keychain group and Sparkle public key from the verified build. The first official release establishes this compatibility baseline. Later releases must preserve it so an update continues to find existing Connections and credentials. Publication also rechecks the draft's tag, target commit, release channel and version ordering immediately before making it public.
+
 Source and tag publication are explicit Git steps so unrelated local changes are never automatically committed. A tag push does not build or release anything by itself. The agent uses `ship` after pushing the exact commit and tag to the configured repository.
 
 The lower-level commands remain available:
@@ -53,6 +55,8 @@ python3 tools/release.py publish
 ## Retrying publication
 
 Prepared artifacts remain in ignored `dist/releases/vX.Y.Z/`. Rerun `ship` to verify and publish those exact bytes after a failed upload. It reuses an existing prepared directory; it does not replace it. Keep that directory until publication and any verification have finished, and back it up if needed. Incomplete or mismatched assets stop the command; published releases are verified without modification, and there is no clobber option. If a partial draft exists and the original local artifacts are missing, recover those original artifacts before retrying. Rebuilding a signed/notarized archive produces different bytes.
+
+An older manifest without the compatibility baseline requires an explicit migration before publication can continue. Preserve its original artifacts; deleting or rebuilding them does not establish compatibility.
 
 Each archive URL includes the immutable version tag. The app reads `https://github.com/lnikell/mydrive/releases/latest/download/appcast.xml`. The agent verifies the published release and reports its URL; pushing source or a tag is not evidence of a successful binary release.
 

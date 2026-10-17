@@ -13,9 +13,9 @@ import xml.etree.ElementTree as ET
 from release_github import GitHub
 from release_repository import validate_origin
 from local_release import prerequisite_problems, release_environment
-from release_support import (ROOT, SPARKLE, VERSION_RE, ReleaseError, artifact_records,
+from release_support import (ROOT, SPARKLE, VERSION_RE, MANIFEST_SCHEMA, ReleaseError, artifact_records,
                              configuration_problems, digest, release_config, run,
-                             source_commit, validate_appcast, validate_manifest, version_info)
+                             release_compatibility, source_commit, validate_appcast, validate_manifest, version_info)
 
 
 def signing_arguments():
@@ -178,8 +178,9 @@ def prepare(config, version):
         check_archive(folder, config, version)
         hashes = "".join(f"{digest(p)}  {p.name}\n" for p in sorted(folder.iterdir()) if p.is_file())
         (folder / "SHA256SUMS").write_text(hashes)
-        manifest = dict(schema_version=1, repository=config["repository"], version=version["version"],
-                        build=version["build"], tag=tag, commit=commit, architecture="arm64", artifacts=artifact_records(folder))
+        manifest = dict(schema_version=MANIFEST_SCHEMA, repository=config["repository"], version=version["version"],
+                        build=version["build"], tag=tag, commit=commit, architecture="arm64",
+                        compatibility=release_compatibility(config), artifacts=artifact_records(folder))
         (folder / "release-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
         validate_manifest(folder, config, version, commit)
         if source_commit(tag) != commit:
@@ -228,7 +229,8 @@ def ship(config, version):
     folder = ROOT / "dist/releases" / tag
     github = GitHub(config["repository"])
     if not folder.exists() and not folder.is_symlink():
-        target = dict(tag=tag, commit=commit, repository=config["repository"], **version)
+        target = dict(schema_version=MANIFEST_SCHEMA, tag=tag, commit=commit, repository=config["repository"],
+                      compatibility=release_compatibility(config), **version)
         github.check_target(target)
         github.check_newer(target)
         previous = github.api(f"repos/{config['repository']}/releases/tags/{tag}", missing_ok=True)

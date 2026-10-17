@@ -10,6 +10,9 @@ import xml.etree.ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 SPARKLE = "http://www.andymatuschak.org/xml-namespaces/sparkle"
 VERSION_RE = re.compile(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\Z")
+MANIFEST_SCHEMA = 2
+COMPATIBILITY_FIELDS = ("team_id", "app_bundle_id", "provider_bundle_id", "app_group_id",
+                        "keychain_access_group", "sparkle_public_key")
 
 
 class ReleaseError(RuntimeError):
@@ -56,6 +59,30 @@ def release_config(root=ROOT):
 
 def configuration_problems(config):
     return _configuration_problems(config, allow_unconfigured=False)
+
+
+def release_compatibility(config):
+    """Identifiers verified against the signed app before its manifest is saved."""
+    value = {name: config.get(name) for name in COMPATIBILITY_FIELDS}
+    _validate_compatibility(value)
+    return value
+
+
+def manifest_compatibility(manifest):
+    if not isinstance(manifest, dict) or type(manifest.get("schema_version")) is not int \
+            or manifest["schema_version"] != MANIFEST_SCHEMA:
+        raise ReleaseError("The release has no supported signed compatibility baseline. Retain its original artifacts and qualify a migration before publishing; no baseline is inferred.")
+    value = manifest.get("compatibility")
+    _validate_compatibility(value)
+    return value
+
+
+def _validate_compatibility(value):
+    if not isinstance(value, dict) or set(value) != set(COMPATIBILITY_FIELDS):
+        raise ReleaseError("The release compatibility baseline is incomplete or unexpected.")
+    config = dict(value, schema_version=1, repository="baseline/metadata")
+    if configuration_problems(config) or not value["keychain_access_group"].startswith(value["team_id"] + "."):
+        raise ReleaseError("The release compatibility baseline has invalid signing, storage or update identities.")
 
 
 def _configuration_problems(config, *, allow_unconfigured):
@@ -107,9 +134,10 @@ def artifact_records(folder):
 
 def validate_manifest(folder, config, version, commit):
     manifest = json.loads((folder / "release-manifest.json").read_text())
-    expected = {"schema_version": 1, "repository": config["repository"],
+    expected = {"schema_version": MANIFEST_SCHEMA, "repository": config["repository"],
                 "version": version["version"], "build": version["build"],
-                "tag": "v" + version["version"], "commit": commit, "architecture": "arm64"}
+                "tag": "v" + version["version"], "commit": commit, "architecture": "arm64",
+                "compatibility": release_compatibility(config)}
     if any(manifest.get(k) != v for k, v in expected.items()):
         raise ReleaseError("Prepared artifacts do not match this repository, version, architecture and source commit.")
     records = manifest.get("artifacts")

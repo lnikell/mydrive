@@ -5,7 +5,7 @@ import re
 import subprocess
 import tempfile
 
-from release_support import VERSION_RE, ReleaseError, digest
+from release_support import VERSION_RE, ReleaseError, digest, manifest_compatibility
 
 
 class GitHub:
@@ -80,8 +80,11 @@ class GitHub:
         raise ReleaseError("Push the exact release commit and tag to the configured repository first.")
 
     def check_newer(self, manifest):
+        compatibility = manifest_compatibility(manifest)
         latest = self.api(f"repos/{self.repository}/releases/latest", missing_ok=True)
-        if latest is None or latest["tag_name"] == manifest["tag"]:
+        if latest is None:
+            # The first verified signed archive establishes the explicit
+            # compatibility contract. Later releases never infer a replacement.
             return
         assets = [x for x in latest["assets"] if x["name"] == "release-manifest.json"]
         if len(assets) != 1:
@@ -89,13 +92,35 @@ class GitHub:
         with tempfile.TemporaryDirectory(prefix="mydrive-latest-check-") as temporary:
             path = Path(temporary) / "manifest.json"
             self.asset_bytes(assets[0], path)
+            if not 1 <= path.stat().st_size <= 65_536:
+                raise ReleaseError("The published compatibility manifest exceeds its supported size.")
             previous = json.loads(path.read_text())
+        if manifest_compatibility(previous) != compatibility:
+            raise ReleaseError("The update changes a published signing, app/provider, storage, Keychain or Sparkle identity. Preserve the established compatibility baseline; qualify an explicit migration before releasing.")
         old_version = previous.get("version", "")
         if not isinstance(old_version, str) or not VERSION_RE.fullmatch(old_version):
             raise ReleaseError("The published latest release has an invalid version manifest.")
-        if previous.get("repository") != manifest["repository"] or int(previous["build"]) >= int(manifest["build"]) \
+        if previous.get("repository") != manifest["repository"] or previous.get("tag") != latest["tag_name"] \
+                or previous["tag"] != "v" + old_version or previous.get("architecture") != "arm64":
+            raise ReleaseError("The published compatibility manifest does not identify the exact latest MyDrive release.")
+        if latest["tag_name"] == manifest["tag"]:
+            return
+        if int(previous["build"]) >= int(manifest["build"]) \
                 or tuple(map(int, old_version.split("."))) >= tuple(map(int, manifest["version"].split("."))):
             raise ReleaseError("A new release must increase both version and build over the published latest release.")
+
+    @staticmethod
+    def require_release_identity(release, manifest, expected_id=None):
+        if not isinstance(release, dict) or type(release.get("id")) is not int or release["id"] <= 0 \
+                or release.get("tag_name") != manifest["tag"] or release.get("prerelease") is not False \
+                or type(release.get("draft")) is not bool \
+                or (expected_id is not None and release["id"] != expected_id):
+            raise ReleaseError("The release identity, exact tag or stable channel changed. Publication stopped; retain the prepared artifacts and inspect the draft.")
+
+    @staticmethod
+    def asset_snapshot(release):
+        return sorted((asset["id"], asset["name"], asset.get("state"), asset.get("size"), asset.get("digest"))
+                      for asset in release["assets"])
 
     def publish(self, folder, manifest, notes):
         self.check_target(manifest)
@@ -108,8 +133,7 @@ class GitHub:
                 "tag_name": tag, "target_commitish": manifest["commit"],
                 "name": f"MyDrive {manifest['version']}", "body": notes,
                 "draft": True, "prerelease": False})
-        if release.get("prerelease"):
-            raise ReleaseError("A prerelease cannot publish the stable update feed.")
+        self.require_release_identity(release, manifest)
         expected = {p.name: p for p in folder.iterdir()}
         assets = {x["name"]: x for x in release["assets"]}
         if set(assets) - set(expected):
@@ -124,10 +148,24 @@ class GitHub:
         for name in sorted(missing, key=lambda n: (n == "appcast.xml", n)):
             self.upload(tag, expected[name])
         verified = self.api(f"{path}/{release['id']}")
+        self.require_release_identity(verified, manifest, release["id"])
         if {x["name"] for x in verified["assets"]} != set(expected):
             raise ReleaseError("The draft asset set changed during publication. Publication stopped.")
         for asset in verified["assets"]:
             self.verify_asset(asset, expected[asset["name"]])
         if verified["draft"]:
-            self.api(f"{path}/{release['id']}", method="PATCH", body={"draft": False, "make_latest": "true"})
+            # Upload/hash verification can take minutes. Revalidate the remote
+            # destination and ordering, then inspect this exact draft once more
+            # before the only transition that can affect the stable feed.
+            self.check_target(manifest)
+            self.check_newer(manifest)
+            final = self.api(f"{path}/{release['id']}")
+            self.require_release_identity(final, manifest, release["id"])
+            if self.asset_snapshot(final) != self.asset_snapshot(verified):
+                raise ReleaseError("The draft assets changed after verification. Publication stopped; no asset was replaced.")
+            if final["draft"]:
+                published = self.api(f"{path}/{release['id']}", method="PATCH", body={"draft": False, "make_latest": "true"})
+                self.require_release_identity(published, manifest, release["id"])
+                if published["draft"]:
+                    raise ReleaseError("GitHub did not confirm publication. Retain the prepared artifacts and inspect the release.")
         return f"https://github.com/{self.repository}/releases/tag/{tag}"
