@@ -1,67 +1,59 @@
-# Releasing MyDrive
+# Releasing MyDrive locally
 
-The same scripts prepare a local release and a GitHub Actions release for [lnikell/mydrive](https://github.com/lnikell/mydrive). CI selects Xcode 26.2 (Swift 6.2.3 and macOS SDK 26.2) and Rust 1.93.0; the deployment target remains macOS 15. Apple distribution signing and CI secrets still require setup. `python3 tools/release.py doctor` lists what is missing. No published app update or successful signed upgrade is claimed until those steps run against real credentials.
+All checks, builds, signing, notarization and publication run on the release Mac through `tools/release.py`. GitHub hosts [the source and release assets](https://github.com/lnikell/mydrive); there are no GitHub Actions workflows or hosted signing secrets. The tested tools are Swift 6.2.3/macOS SDK 26.2 and Rust 1.93.0. Command Line Tools or Xcode can supply the Apple tools. The release channel is arm64/macOS 15+.
 
 ## One-time setup
 
-1. Verify this checkout's `origin` and the public repository in `release/config.json`. The source uses MIT, as selected by the owner. Run `python3 tools/check-publication.py --working-tree` before staging; private research, plans, local agent instructions, build output, signing material and local NAS metadata are excluded. Set `git config core.hooksPath .githooks` in a new clone to enable the commit guard.
-2. Finalize the app/provider bundle identifiers and App Group before the first public release. Register matching Apple identifiers, enable the required capabilities, create Developer ID provisioning profiles for both bundles, and install a **Developer ID Application** identity with its private key. Set the public `team_id`, `app_group_id` and provisioned `keychain_access_group`. Preserve these identifiers for every subsequent update.
-3. Fetch the pinned Sparkle tools with `python3 tools/fetch-sparkle.py`. Run `.build/dependencies/Sparkle-2.10.0/bin/generate_keys --account mydrive-release` once. It creates or reuses a Keychain private key and prints the public key. Copy only that public key to `sparkle_public_key` in release configuration. Back up the private key securely; losing it complicates future updates.
-4. Configure notarization using a `notarytool` Keychain profile, or an App Store Connect API key with the necessary role. Enter account credentials directly into Apple's tools; never send them through chat or commit them.
-5. Commit configuration, release notes, source and workflows. Protect release tags and restrict who can change the Release workflow. GitHub's optional immutable releases fit the draft-first upload procedure.
+1. Verify `origin` and `release/config.json` point to the intended repository. Enable the local commit guard with `git config core.hooksPath .githooks`. The source uses MIT. Plans, research, agent instructions, local settings, build output and signing material stay ignored.
+2. Register the app/provider bundle identifiers and App Group with Apple. Install a **Developer ID Application** identity with its private key and matching Developer ID provisioning profiles for both bundles. Configure the public `team_id`, `app_group_id` and provisioned `keychain_access_group` in `release/config.json`. Preserve these identifiers across releases.
+3. Fetch Sparkle using `python3 tools/fetch-sparkle.py`. Run `.build/dependencies/Sparkle-2.10.0/bin/generate_keys --account mydrive-release` once to create or reuse its Keychain signing key. Configure only its public key as `sparkle_public_key`. Preserve the private key and keep a secure backup; never rotate it casually.
+4. Store notarization credentials with Apple's `notarytool store-credentials` and give the profile a stable name. Enter credentials directly into Apple's tools. An App Store Connect API key in a private local file is also supported.
+5. Authenticate the local GitHub CLI with `gh auth login --hostname github.com`. Git push authentication is separate from release API access. No token belongs in source, chat or a settings file.
+6. Save paths and public identity names in ignored `.local/release.json`, or supply the same values as environment variables. Environment values take precedence. Run `python3 tools/release.py doctor` to identify missing setup before an expensive build.
 
-Local release environment (paths and public identity names, not raw secrets):
+Local settings use this shape; replace the example paths and identity with the installed credentials:
 
-| Variable | Purpose |
-| --- | --- |
-| `MYDRIVE_SIGN_IDENTITY` | Developer ID Application certificate name or SHA-1 identity |
-| `MYDRIVE_HOST_PROFILE` | Matching app `.provisionprofile` path |
-| `MYDRIVE_PROVIDER_PROFILE` | Matching extension `.provisionprofile` path |
-| `MYDRIVE_NOTARY_KEYCHAIN_PROFILE` | Stored `notarytool` profile |
-| `MYDRIVE_SPARKLE_KEY_FILE` | Optional mode-0600 exported key; otherwise uses Keychain account `mydrive-release` |
-
-Instead of the notarization Keychain profile, set `MYDRIVE_NOTARY_KEY_PATH`, `MYDRIVE_NOTARY_KEY_ID` and `MYDRIVE_NOTARY_ISSUER_ID`. Never pass a private key's contents as a command-line argument. Install and authenticate GitHub CLI (`gh`) for local uploads. The current release channel is arm64/macOS 15+, and the appcast declares its hardware requirement.
-
-## Future fixes and versions
-
-After implementing and checking a fix:
-
-```sh
-python3 tools/release.py bump 0.2.1 --build 3
-# Write release/notes/0.2.1.md, commit the intended changes, then:
-git tag v0.2.1
-git push origin main
-git push origin v0.2.1
+```json
+{
+  "MYDRIVE_SIGN_IDENTITY": "Developer ID Application: Your Name (TEAMID)",
+  "MYDRIVE_HOST_PROFILE": "/absolute/path/to/MyDrive.provisionprofile",
+  "MYDRIVE_PROVIDER_PROFILE": "/absolute/path/to/MyDriveProvider.provisionprofile",
+  "MYDRIVE_NOTARY_KEYCHAIN_PROFILE": "mydrive-notary"
+}
 ```
 
-The tag starts `.github/workflows/release.yml`. The workflow accepts manual reruns on that same tag. It runs tests without NAS access, imports credentials into a temporary CI Keychain, builds in an isolated release workspace, notarizes, staples, archives with preserved framework links, generates a signed feed, and verifies the extracted archive. It saves those exact prepared bytes as a CI artifact for 30 days before uploading the complete set into a draft. Publication is the final step. It restores the runner's Keychain search list and removes temporary signing material afterward. A retry recovers and verifies the same commit's artifact from the Release workflow; if a partial draft exists and its original artifact is unavailable, it stops before rebuilding.
+The loader accepts only documented nonsecret settings and rejects unknown keys. `MYDRIVE_SPARKLE_KEY_FILE` optionally points to a mode-0600 private export; omitting it uses Keychain account `mydrive-release`. Instead of the notarization profile, supply `MYDRIVE_NOTARY_KEY_PATH`, `MYDRIVE_NOTARY_KEY_ID` and `MYDRIVE_NOTARY_ISSUER_ID`. Store paths and identifiers, never private key contents, passwords or tokens, in the local JSON file.
 
-For local execution from the clean release tag:
+## Future fixes and releases
+
+The agent implements the fix, runs appropriate local checks, bumps the version/build, writes release notes and commits the intended source. For example:
 
 ```sh
 python3 tools/release.py doctor
+python3 tools/release.py bump 0.2.1 --build 3
+# Write release/notes/0.2.1.md and commit the intended source.
+git tag v0.2.1
+git push origin main
+git push origin v0.2.1
+python3 tools/release.py ship
+```
+
+`ship` requires a clean checkout at the exact version tag. For a new release, it runs the publication guard and local test suite, builds in an isolated workspace, validates both provisioning profiles, signs the app and extension, notarizes, staples, archives, signs the Sparkle feed, re-extracts/verifies the app, and uploads a draft release. It checks immutable asset hashes and makes the release public only after all assets are verified. Development builds are never official releases. No NAS credentials are needed for these checks.
+
+Source and tag publication are explicit Git steps so unrelated local changes are never automatically committed. A tag push does not build or release anything by itself. The agent uses `ship` after pushing the exact commit and tag to the configured repository.
+
+The lower-level commands remain available:
+
+```sh
 python3 tools/release.py prepare
 python3 tools/release.py verify
 python3 tools/release.py publish
 ```
 
-Artifacts appear in `dist/releases/vX.Y.Z/` only after preparation succeeds. The archive URL contains the immutable version tag. The app reads `https://github.com/OWNER/REPO/releases/latest/download/appcast.xml`; all assets become public together. A partial upload can resume with `publish` using the same prepared artifacts. Existing mismatched or public assets stop the command. Rebuilding a signed/notarized archive produces different bytes: do not mix a rebuilt archive with a partially uploaded draft; inspect the retained draft and original artifacts before taking any recovery action.
+## Retrying publication
 
-## GitHub release environment
+Prepared artifacts remain in ignored `dist/releases/vX.Y.Z/`. Rerun `ship` to verify and publish those exact bytes after a failed upload. It reuses an existing prepared directory; it does not replace it. Keep that directory until publication and any verification have finished, and back it up if needed. Incomplete or mismatched assets stop the command; published releases are verified without modification, and there is no clobber option. If a partial draft exists and the original local artifacts are missing, recover those original artifacts before retrying. Rebuilding a signed/notarized archive produces different bytes.
 
-Create an environment named `release`. The workflow has no mandatory reviewer gate, so authorized future releases can run autonomously. Add these secrets directly in GitHub's settings:
+Each archive URL includes the immutable version tag. The app reads `https://github.com/lnikell/mydrive/releases/latest/download/appcast.xml`. The agent verifies the published release and reports its URL; pushing source or a tag is not evidence of a successful binary release.
 
-| Secret | Contents |
-| --- | --- |
-| `MYDRIVE_CERTIFICATE_P12_BASE64` | Base64 export containing the Developer ID certificate and private key |
-| `MYDRIVE_CERTIFICATE_PASSWORD` | That export's password |
-| `MYDRIVE_HOST_PROFILE_BASE64` | Base64 app provisioning profile |
-| `MYDRIVE_PROVIDER_PROFILE_BASE64` | Base64 provider provisioning profile |
-| `MYDRIVE_SPARKLE_PRIVATE_KEY` | Exported Sparkle private key text, not an extra base64 encoding |
-| `MYDRIVE_NOTARY_KEY_BASE64` | Base64 `.p8` API key |
-
-Add environment variables `MYDRIVE_SIGN_IDENTITY`, `MYDRIVE_NOTARY_KEY_ID`, and `MYDRIVE_NOTARY_ISSUER_ID`. `GH_TOKEN` comes from the workflow's short-lived GitHub token, scoped to repository contents. No NAS password is needed. Secret import refuses to run outside a GitHub-hosted runner and refuses a workflow repository/tag that differs from the configured version.
-
-The first real signed release needs an installed old-to-new update trial: confirm stable Finder locations, saved credentials, offline files, download indicators, offload and removal. The local test suite verifies release guards and signature handling; it cannot prove Apple's signing, notarization service or a real Sparkle installation without the account setup.
-
-Primary references: [Sparkle integration](https://sparkle-project.org/documentation/), [sandbox integration and nested signing](https://sparkle-project.org/documentation/sandboxing/), [signed update publication](https://sparkle-project.org/documentation/publishing/), [Apple notarization](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution), [GitHub draft releases](https://docs.github.com/en/repositories/releasing-projects-on-github/managing-releases-in-a-repository).
+Apple signing setup is still required before the first official release. The first signed release also needs an actual installed old-to-new update trial covering Finder locations, saved credentials, offline files, status indicators, offload and removal. Local tests verify release guards and signature handling; they do not replace that qualification.

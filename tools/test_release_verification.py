@@ -231,10 +231,10 @@ class LatestRelease(GitHub):
         if path.endswith("/releases/latest"):
             return {"tag_name": "v" + self.previous["version"],
                     "assets": [{"id": 1, "name": "release-manifest.json"}]}
-        if "/commits/" in path:
-            return {"sha": COMMIT}
+        if "/git/ref/tags/" in path:
+            return {"ref": "refs/tags/" + path.rsplit("/", 1)[1], "object": {"type": "commit", "sha": COMMIT}}
         if path == "repos/" + self.repository:
-            return {"private": False, "archived": False}
+            return {"private": False, "archived": False, "full_name": self.repository}
         raise AssertionError("Version rejection must precede draft/asset access")
 
     def asset_bytes(self, asset, destination):

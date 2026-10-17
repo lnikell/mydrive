@@ -1,6 +1,7 @@
 """Draft-first GitHub publication. Existing assets are verified, never clobbered."""
 import json
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
@@ -12,7 +13,7 @@ class GitHub:
         self.repository = repository
 
     def api(self, path, *, method="GET", body=None, missing_ok=False):
-        command = ["gh", "api", path, "--method", method]
+        command = ["gh", "api", "--hostname", "github.com", path, "--method", method]
         if body is not None:
             command += ["--input", "-"]
         result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
@@ -26,7 +27,7 @@ class GitHub:
     def asset_bytes(self, asset, destination):
         # gh handles auth without placing a token in argv or source files.
         with destination.open("wb") as output:
-            result = subprocess.run(["gh", "api", f"repos/{self.repository}/releases/assets/{asset['id']}",
+            result = subprocess.run(["gh", "api", "--hostname", "github.com", f"repos/{self.repository}/releases/assets/{asset['id']}",
                                      "--header", "Accept: application/octet-stream"],
                                     stdout=output, stderr=subprocess.PIPE, timeout=300)
         if result.returncode:
@@ -34,7 +35,7 @@ class GitHub:
 
     def verify_asset(self, asset, path):
         if asset.get("state") != "uploaded" or asset.get("size") != path.stat().st_size:
-            raise ReleaseError(f"Uploaded asset is incomplete: {path.name}")
+            raise ReleaseError(f"Release asset is incomplete: {path.name}. Inspect its release before retrying; retain the original prepared files. No asset was replaced.")
         expected = "sha256:" + digest(path)
         if asset.get("digest"):
             if asset["digest"] != expected:
@@ -47,7 +48,7 @@ class GitHub:
                     raise ReleaseError(f"Uploaded asset differs: {path.name}. It will not be overwritten.")
 
     def upload(self, tag, path):
-        result = subprocess.run(["gh", "release", "upload", tag, str(path), "--repo", self.repository],
+        result = subprocess.run(["gh", "release", "upload", tag, str(path), "--repo", "github.com/" + self.repository],
                                 capture_output=True, timeout=300)
         if result.returncode:
             raise ReleaseError(f"Upload failed for {path.name}. Keep the draft and rerun publish to verify/resume.")
@@ -56,9 +57,27 @@ class GitHub:
         repo = self.api(f"repos/{self.repository}")
         if repo.get("private") is not False or repo.get("archived") is not False:
             raise ReleaseError("Public automatic updates require the intended public, active repository.")
-        remote = self.api(f"repos/{self.repository}/commits/{manifest['tag']}")
-        if remote.get("sha") != manifest["commit"]:
-            raise ReleaseError("Push the exact release commit and tag to the configured repository first.")
+        if not isinstance(repo.get("full_name"), str) or repo["full_name"].casefold() != self.repository.casefold():
+            raise ReleaseError("The GitHub repository identity differs from release/config.json.")
+        reference = self.api(f"repos/{self.repository}/git/ref/tags/{manifest['tag']}")
+        if not isinstance(reference, dict) or reference.get("ref") != "refs/tags/" + manifest["tag"]:
+            raise ReleaseError("Push the exact release tag to the configured repository first.")
+        target = reference.get("object")
+        seen = set()
+        for _ in range(8):
+            if not isinstance(target, dict) or not isinstance(target.get("sha"), str) \
+                    or not re.fullmatch(r"[0-9a-f]{40}", target["sha"]):
+                break
+            if target.get("type") == "commit":
+                if target["sha"] == manifest["commit"]:
+                    return
+                break
+            if target.get("type") != "tag" or target["sha"] in seen:
+                break
+            seen.add(target["sha"])
+            annotation = self.api(f"repos/{self.repository}/git/tags/{target['sha']}")
+            target = annotation.get("object") if isinstance(annotation, dict) else None
+        raise ReleaseError("Push the exact release commit and tag to the configured repository first.")
 
     def check_newer(self, manifest):
         latest = self.api(f"repos/{self.repository}/releases/latest", missing_ok=True)

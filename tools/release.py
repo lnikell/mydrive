@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Prepare, verify and publish signed MyDrive releases using the same local/CI path."""
+"""Prepare, verify and publish signed MyDrive releases from this Mac."""
 import argparse
 import json
 import os
 from pathlib import Path
-import platform
 import plistlib
-import shutil
 import subprocess
 import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
 from release_github import GitHub
+from release_repository import validate_origin
+from local_release import prerequisite_problems, release_environment
 from release_support import (ROOT, SPARKLE, VERSION_RE, ReleaseError, artifact_records,
                              configuration_problems, digest, release_config, run,
                              source_commit, validate_appcast, validate_manifest, version_info)
@@ -56,22 +56,12 @@ def verify_signing_key(sparkle, config):
 
 
 def doctor(config):
-    problems = configuration_problems(config)
-    if platform.machine() != "arm64":
-        problems.append("This release channel currently builds Apple silicon (arm64) only.")
-    for command in ("git", "xcrun", "codesign", "ditto", "cargo", "gh"):
-        if not shutil.which(command):
-            problems.append(f"Install {command} before releasing.")
-    if not (ROOT / ".git").exists():
-        problems.append("Initialize Git and configure the intended GitHub origin.")
-    if not os.environ.get("MYDRIVE_SIGN_IDENTITY") or os.environ["MYDRIVE_SIGN_IDENTITY"] == "-":
-        problems.append("Set MYDRIVE_SIGN_IDENTITY to a Developer ID Application signing identity.")
-    for name in ("MYDRIVE_HOST_PROFILE", "MYDRIVE_PROVIDER_PROFILE"):
-        if not Path(os.environ.get(name, "/nonexistent")).is_file():
-            problems.append(f"Set {name} to its Developer ID provisioning profile.")
-    if not os.environ.get("MYDRIVE_NOTARY_KEYCHAIN_PROFILE") and not all(os.environ.get(x) for x in (
-            "MYDRIVE_NOTARY_KEY_PATH", "MYDRIVE_NOTARY_KEY_ID", "MYDRIVE_NOTARY_ISSUER_ID")):
-        problems.append("Configure a notarytool Keychain profile or App Store Connect API key credentials.")
+    problems = configuration_problems(config) + prerequisite_problems(ROOT)
+    if config.get("repository"):
+        try:
+            validate_origin(config, ROOT)
+        except ReleaseError as error:
+            problems.append(str(error))
     return problems
 
 
@@ -208,10 +198,54 @@ def bump(version, build):
     print(f"Set version {version} ({build}). Write release notes, commit, and tag before prepare.")
 
 
+def verified_release(config, version):
+    issues = configuration_problems(config)
+    if issues:
+        raise ReleaseError("Release configuration is incomplete:\n- " + "\n- ".join(issues))
+    commit = source_commit("v" + version["version"])
+    folder = ROOT / "dist/releases" / ("v" + version["version"])
+    manifest = validate_manifest(folder, config, version, commit)
+    verify_signatures(folder, sparkle_path(), config, version)
+    check_archive(folder, config, version)
+    return folder, manifest
+
+
+def publish_prepared(config, version):
+    validate_origin(config, ROOT)
+    folder, manifest = verified_release(config, version)
+    notes = (ROOT / f"release/notes/{version['version']}.md").read_text()
+    return GitHub(config["repository"]).publish(folder, manifest, notes)
+
+
+def ship(config, version):
+    """Reuse signed bytes; only a first release without remote assets may build."""
+    issues = configuration_problems(config)
+    if issues:
+        raise ReleaseError("Release configuration is incomplete:\n- " + "\n- ".join(issues))
+    validate_origin(config, ROOT)
+    tag = "v" + version["version"]
+    commit = source_commit(tag)
+    folder = ROOT / "dist/releases" / tag
+    github = GitHub(config["repository"])
+    if not folder.exists() and not folder.is_symlink():
+        target = dict(tag=tag, commit=commit, repository=config["repository"], **version)
+        github.check_target(target)
+        github.check_newer(target)
+        previous = github.api(f"repos/{config['repository']}/releases/tags/{tag}", missing_ok=True)
+        if previous is not None and (previous.get("assets") or previous.get("draft") is not True):
+            raise ReleaseError("This tag already has remote release assets or a published release, but its original local artifacts are missing. Restore dist/releases/" + tag + " from a backup; ship will not rebuild different signed bytes.")
+        if previous is not None and previous.get("prerelease") is True:
+            raise ReleaseError("This tag already names a prerelease. Reconcile that release before shipping to the stable channel.")
+        prepare(config, version)
+    else:
+        print("Reusing the existing prepared release; no rebuild will run.", flush=True)
+    return publish_prepared(config, version)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    for name in ("doctor", "prepare", "verify", "publish"):
+    for name in ("doctor", "prepare", "verify", "publish", "ship"):
         commands.add_parser(name)
     change = commands.add_parser("bump")
     change.add_argument("version")
@@ -220,6 +254,7 @@ def main():
     if args.command == "bump":
         bump(args.version, args.build)
         return
+    os.environ.update(release_environment(ROOT))
     config, version = release_config(), version_info()
     if args.command == "doctor":
         issues = doctor(config)
@@ -228,20 +263,13 @@ def main():
             raise SystemExit(1)
     elif args.command == "prepare":
         prepare(config, version)
+    elif args.command == "ship":
+        print(ship(config, version))
+    elif args.command == "publish":
+        print(publish_prepared(config, version))
     else:
-        issues = configuration_problems(config)
-        if issues:
-            raise ReleaseError("Release configuration is incomplete:\n- " + "\n- ".join(issues))
-        commit = source_commit("v" + version["version"])
-        folder = ROOT / "dist/releases" / ("v" + version["version"])
-        manifest = validate_manifest(folder, config, version, commit)
-        verify_signatures(folder, sparkle_path(), config, version)
-        check_archive(folder, config, version)
-        if args.command == "verify":
-            print("Release archive, feed, signatures, notarization and source provenance verified.")
-        else:
-            notes = (ROOT / f"release/notes/{version['version']}.md").read_text()
-            print(GitHub(config["repository"]).publish(folder, manifest, notes))
+        verified_release(config, version)
+        print("Release archive, feed, signatures, notarization and source provenance verified.")
 
 
 if __name__ == "__main__":

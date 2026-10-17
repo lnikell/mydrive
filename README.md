@@ -6,7 +6,7 @@ Native macOS NAS client in development. The approved design uses a Swift host an
 
 - A compact native drive list with Add/Reconnect sheets and per-drive Finder, refresh, offload and removal actions.
 - Multiple saved SMB Connections, each with its own stable Finder Domain, Catalog, credentials and refresh monitor.
-- Sparkle 2.10 native update checks and automatic download/install preferences, with a GitHub Releases pipeline for signed and notarized releases. Public distribution still needs repository and Apple signing configuration.
+- Sparkle 2.10 native update checks and automatic download/install preferences, with local scripts publishing signed and notarized updates to GitHub Releases. Public distribution still needs Apple signing configuration.
 - A replicated File Provider adapter for real NAS listings and full-file hydration. Remote writes remain disabled until their journal and concurrency semantics are verified.
 - Finder Keep Downloaded and Free Up Space actions, verified with real files and an unopened nested folder on the UNAS.
 - Native Finder cloud and download-progress indicators, driven by macOS materialization state and real transferred bytes. Progress remains below completion until content validation succeeds.
@@ -49,8 +49,8 @@ Free Up Space evicted both 2 MiB files in a nested folder after one Finder actio
 
 ## Releases
 
-Run `bash tools/check.sh` for all no-NAS checks. `python3 tools/release.py doctor` reports missing release setup. The [release guide](docs/releasing.md) covers local and GitHub Actions releases. Version/build numbers and public settings live in `release/`. Private signing material stays outside source. Development builds never start public update checks.
+Releases run entirely on your Mac. `python3 tools/release.py doctor` reports missing setup, and `python3 tools/release.py ship` checks, builds, signs, notarizes and publishes the tagged version. The [release guide](docs/releasing.md) covers the local settings and exact source/tag steps. GitHub hosts source and update assets; no GitHub Actions workflows are used. Version/build numbers and public settings live in `release/`. Development builds never start public update checks.
 
-`python3 tools/check-publication.py --working-tree` previews files eligible for Git. The checked-in pre-commit hook and release checks reject private documents, credential files and recognizable secret formats, including files force-added past `.gitignore`. Enable the hook in a new clone with `git config core.hooksPath .githooks`. Research, plans, local agent instructions, runtime reports and test-server metadata stay local. The Sparkle public verification key is intentionally public; its private signing key stays in Keychain or CI secrets.
+`python3 tools/check-publication.py --working-tree` previews files eligible for Git. The checked-in pre-commit hook and release checks reject private documents, credential files and recognizable secret formats, including files force-added past `.gitignore`. Enable the hook in a new clone with `git config core.hooksPath .githooks`. Research, plans, local agent instructions, runtime reports and test-server metadata stay local. The Sparkle public verification key is intentionally public; its private signing key stays in Keychain or a private local file.
 
 MyDrive source is available under the [MIT license](LICENSE). Dependencies retain their own licenses.

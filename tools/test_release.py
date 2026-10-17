@@ -1,7 +1,9 @@
 import base64
 import copy
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -9,7 +11,6 @@ from unittest.mock import patch
 from release_github import GitHub
 from release_support import (SPARKLE, ReleaseError, artifact_records, configuration_problems,
                              digest, validate_manifest, version_info)
-import ci_artifacts
 
 
 CONFIG = dict(schema_version=1, repository="example/MyDrive", team_id="ABC1234567",
@@ -49,13 +50,29 @@ class FakeGitHub(GitHub):
         self.target_sha = manifest["commit"]
         self.private = False
         self.latest = None
+        self.full_name = self.repository
+        self.tag_exists = True
+        self.tag_object = None
+        self.annotated = {}
+        self.tag_reads = []
 
     def api(self, path, *, method="GET", body=None, missing_ok=False):
         prefix = "repos/" + self.repository
         if path == prefix:
-            return {"private": self.private, "archived": False}
+            return {"private": self.private, "archived": False, "full_name": self.full_name}
         if path == prefix + "/commits/" + self.manifest["tag"]:
+            # A same-named branch is deliberately still resolvable. Production
+            # must request the exact tag reference rather than this endpoint.
             return {"sha": self.target_sha}
+        if path == prefix + "/git/ref/tags/" + self.manifest["tag"]:
+            if not self.tag_exists:
+                return {}
+            return {"ref": "refs/tags/" + self.manifest["tag"],
+                    "object": self.tag_object or {"type": "commit", "sha": self.target_sha}}
+        if path.startswith(prefix + "/git/tags/"):
+            sha = path.rsplit("/", 1)[1]
+            self.tag_reads.append(sha)
+            return {"object": self.annotated.get(sha)}
         if path == prefix + "/releases/latest":
             return copy.deepcopy(self.latest)
         if method == "POST":
@@ -172,41 +189,66 @@ class ReleaseTests(unittest.TestCase):
         archive = self.folder / "MyDrive-0.2.0-arm64.zip"
         github.verify_asset(dict(name=archive.name, id=1, state="uploaded", size=archive.stat().st_size), archive)
 
-    def test_ci_without_recoverable_artifact_does_not_rebuild_partial_draft(self):
-        class Server:
-            def api(self, path, **kwargs):
-                if "/actions/artifacts?" in path:
-                    return {"artifacts": []}
-                return {"draft": True, "assets": [{"name": "appcast.xml"}]}
-        with patch.object(ci_artifacts, "ROOT", self.folder), \
-                patch.object(ci_artifacts, "source_commit", return_value="a" * 40), \
-                patch.object(ci_artifacts, "GitHub", return_value=Server()):
-            with self.assertRaisesRegex(ReleaseError, "original artifacts"):
-                ci_artifacts.recover(CONFIG, VERSION)
-        self.assertFalse((self.folder / "dist").exists())
+    def test_missing_remote_tag_cannot_be_replaced_by_same_named_branch(self):
+        github = FakeGitHub(self.folder, self.manifest)
+        github.tag_exists = False
+        with self.assertRaisesRegex(ReleaseError, "exact release tag"):
+            github.publish(self.folder, self.manifest, "Notes")
+        self.assertIsNone(github.release)
+        self.assertEqual(github.uploads, [])
 
-    def test_ci_recovers_same_signed_bytes_only_from_release_workflow(self):
-        class Server:
-            def api(self, path, **kwargs):
-                if "/actions/artifacts?" in path:
-                    return {"artifacts": [dict(name="mydrive-release-" + "a" * 40, expired=False,
-                                               workflow_run={"id": 7, "head_sha": "a" * 40})]}
-                return {"id": 7, "path": ".github/workflows/release.yml", "event": "push"}
-        def download(args, **kwargs):
-            destination = Path(args[args.index("--dir") + 1])
-            for file in self.folder.iterdir():
-                if file.is_file():
-                    (destination / file.name).write_bytes(file.read_bytes())
-            return type("Result", (), {"returncode": 0})()
-        with patch.object(ci_artifacts, "ROOT", self.folder), \
-                patch.object(ci_artifacts, "source_commit", return_value="a" * 40), \
-                patch.object(ci_artifacts, "GitHub", return_value=Server()), \
-                patch.object(ci_artifacts.subprocess, "run", side_effect=download):
-            reused, name, folder = ci_artifacts.recover(CONFIG, VERSION)
-            self.assertTrue(reused)
-            self.assertEqual((folder / "MyDrive-0.2.0-arm64.zip").read_bytes(), b"test archive bytes")
-            self.assertEqual(name, "mydrive-release-" + "a" * 40)
-            validate_manifest(folder, CONFIG, VERSION, "a" * 40)
+    def test_annotated_tag_resolves_to_the_exact_intended_commit(self):
+        github = FakeGitHub(self.folder, self.manifest)
+        github.tag_object = {"type": "tag", "sha": "b" * 40}
+        github.annotated["b" * 40] = {"type": "commit", "sha": self.manifest["commit"]}
+        github.check_target(self.manifest)
+        self.assertEqual(github.tag_reads, ["b" * 40])
+        github.annotated["b" * 40] = {"type": "commit", "sha": "c" * 40}
+        with self.assertRaisesRegex(ReleaseError, "exact release commit"):
+            github.check_target(self.manifest)
+
+    def test_cyclic_or_unsupported_tag_object_stops_before_publication(self):
+        github = FakeGitHub(self.folder, self.manifest)
+        github.tag_object = {"type": "tag", "sha": "b" * 40}
+        github.annotated["b" * 40] = dict(github.tag_object)
+        with self.assertRaises(ReleaseError):
+            github.publish(self.folder, self.manifest, "Notes")
+        self.assertEqual(github.tag_reads, ["b" * 40])
+        self.assertIsNone(github.release)
+        github.tag_object = {"type": "tree", "sha": "b" * 40}
+        with self.assertRaises(ReleaseError):
+            github.check_target(self.manifest)
+
+    def test_redirected_repository_identity_stops_before_publication(self):
+        github = FakeGitHub(self.folder, self.manifest)
+        github.full_name = "another-owner/MyDrive"
+        with self.assertRaisesRegex(ReleaseError, "repository identity"):
+            github.publish(self.folder, self.manifest, "Notes")
+        self.assertIsNone(github.release)
+
+    def test_all_cli_operations_pin_github_com_despite_host_override(self):
+        commands = []
+        def execute(arguments, **kwargs):
+            commands.append(arguments)
+            return subprocess.CompletedProcess(arguments, 0, stdout="{}", stderr="")
+        github = GitHub(CONFIG["repository"])
+        with patch.dict(os.environ, {"GH_HOST": "enterprise.example"}), \
+                patch("release_github.subprocess.run", side_effect=execute):
+            github.api("repos/" + CONFIG["repository"])
+            github.asset_bytes({"id": 1}, self.folder / "download")
+            github.upload("v0.2.0", self.folder / "MyDrive-0.2.0-arm64.zip")
+        for command in commands[:2]:
+            self.assertEqual(command[command.index("--hostname") + 1], "github.com")
+        self.assertEqual(commands[2][commands[2].index("--repo") + 1], "github.com/" + CONFIG["repository"])
+
+    def test_incomplete_starter_asset_stays_untouched_with_recovery_message(self):
+        github = FakeGitHub(self.folder, self.manifest)
+        github.release = dict(id=42, draft=True, prerelease=False, assets=[dict(
+            name="appcast.xml", state="starter", size=0)])
+        with self.assertRaisesRegex(ReleaseError, "Inspect its release.*original prepared"):
+            github.publish(self.folder, self.manifest, "Notes")
+        self.assertEqual(github.uploads, [])
+        self.assertEqual(github.publications, 0)
 
 
 if __name__ == "__main__":
