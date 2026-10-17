@@ -51,6 +51,14 @@ id_ed25519*
 secrets/
 credentials.json
 *private-key*
+*private_key*
+update-key
+update_key
+signing-key
+signing_key
+api-key
+api_key
+secrets.json
 .env*
 
 # Keep planning/research and personal agent instructions local.
@@ -70,6 +78,12 @@ credentials.json
 /TODO.md
 /NOTES.md
 /architecture-review-*.html
+# Local notes remain private when saved in another format.
+[Pp][Ll][Aa][Nn].*
+[Pp][Ll][Aa][Nn][Ss].*
+[Pp][Ll][Aa][Nn][Nn][Ii][Nn][Gg].*
+[Tt][Oo][Dd][Oo].*
+[Nn][Oo][Tt][Ee][Ss].*
 
 # Editor and machine-specific settings
 .idea/

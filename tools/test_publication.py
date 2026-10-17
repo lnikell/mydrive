@@ -28,7 +28,8 @@ class PublicationTests(unittest.TestCase):
     def test_gitignore_keeps_local_docs_and_signing_data_out_of_add_all(self):
         private = ["docs/research/design.md", "docs/adr/decision.md", "docs/implementation-progress.md", "docs/future-plan.md",
                    "AGENTS.md", "GLOSSARY.md", ".agents/skills/release/SKILL.md", ".local/nas-test.json",
-                   "signing.p12", "AuthKey.p8", ".env.local", "dist/MyDrive.app/executable", "Transport/target/helper"]
+                   "signing.p12", "AuthKey.p8", ".env.local", "update-key", "secrets.json", "PLAN.txt", "notes.html",
+                   "dist/MyDrive.app/executable", "Transport/target/helper"]
         public = ["README.md", "docs/releasing.md", "release/notes/0.2.0.md", "MacApp/File.swift"]
         for path in private + public:
             self.write(path, b"example\n")
@@ -64,6 +65,20 @@ class PublicationTests(unittest.TestCase):
         result = publication.findings("unexpected.txt", value)
         self.assertEqual(result, [(1, "private key material")])
         self.assertNotIn("secret content", str(result))
+
+    def test_non_markdown_plans_and_raw_key_exports_are_rejected_by_path(self):
+        for path in ("PLAN.txt", "notes.html", "folder/Planning.json", "update-key", "config/signing_key.txt",
+                     "config/API-KEY", "config/secrets.json"):
+            self.assertTrue(publication.findings(path, b"synthetic private value"), path)
+
+    def test_nested_json_credentials_are_rejected_without_echoing_the_value(self):
+        import json
+        value = "synthetic-do-not-echo"
+        for field in publication.SECRET_JSON_FIELDS:
+            result = publication.findings("config/service.json", json.dumps({"accounts": [{field: value}]}).encode())
+            self.assertEqual(result, [(None, "populated credential field in JSON")])
+            self.assertNotIn(value, str(result))
+        self.assertEqual(publication.findings("config/example.json", b'{"password": null, "api_key": ""}'), [])
 
     def test_public_update_key_is_allowed_but_private_config_fields_are_not(self):
         import json

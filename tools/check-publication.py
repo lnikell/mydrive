@@ -15,12 +15,23 @@ PRIVATE_SUFFIXES = {".p12", ".pfx", ".pem", ".key", ".p8", ".mobileprovision", "
 PUBLIC_MARKDOWN = {"README.md", "Core/README.md", "Transport/README.md", "docs/releasing.md"}
 PUBLIC_CONFIG_KEYS = {"schema_version", "repository", "team_id", "keychain_access_group", "sparkle_public_key",
                       "app_bundle_id", "provider_bundle_id", "app_group_id"}
+PRIVATE_DOCUMENT_STEMS = {"plan", "plans", "planning", "todo", "notes", "agents", "glossary"}
+PRIVATE_KEY_NAMES = re.compile(r"(?:^|[-_.])(?:private[-_]?key|signing[-_]?key|update[-_]?key|api[-_]?key|credentials?|secrets?)(?:[-_.]|$)", re.I)
+SECRET_JSON_FIELDS = {"password", "passwd", "token", "api_key", "apikey", "access_token", "refresh_token",
+                      "client_secret", "private_key", "signing_key", "update_key", "certificate_password"}
 SECRET_PATTERNS = [
     (re.compile(rb"-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----"), "private key material"),
     (re.compile(rb"\b(?:gh[pousr]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{40,})\b"), "GitHub token"),
     (re.compile(rb"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), "cloud access key"),
     (re.compile(rb"[a-zA-Z][a-zA-Z0-9+.-]*://[^\s/:@]+:[^\s/@]+@"), "credential-bearing URL"),
 ]
+
+
+def contains_json_secret(value):
+    if isinstance(value, dict):
+        return any((str(key).lower() in SECRET_JSON_FIELDS and item not in (None, "", False))
+                   or contains_json_secret(item) for key, item in value.items())
+    return isinstance(value, list) and any(contains_json_secret(item) for item in value)
 
 
 def findings(path, data):
@@ -32,8 +43,10 @@ def findings(path, data):
         result.append((None, "local-only documents or generated/private data"))
     if file.name.lower().startswith("architecture-review-"):
         result.append((None, "private architecture review report"))
+    if file.stem.lower() in PRIVATE_DOCUMENT_STEMS:
+        result.append((None, "local-only planning or notes document"))
     if file.suffix.lower() in PRIVATE_SUFFIXES or file.name.lower().startswith((".env", "id_rsa", "id_ed25519")) \
-            or "private-key" in file.name.lower() or file.name.lower() == "credentials.json":
+            or PRIVATE_KEY_NAMES.search(file.name):
         result.append((None, "credential or signing file"))
     if file.parts[0] == "docs" and path != "docs/releasing.md":
         result.append((None, "private planning/research document"))
@@ -43,6 +56,12 @@ def findings(path, data):
     for pattern, category in SECRET_PATTERNS:
         for match in pattern.finditer(data):
             result.append((data[:match.start()].count(b"\n") + 1, category))
+    if file.suffix.lower() == ".json":
+        try:
+            if contains_json_secret(json.loads(data)):
+                result.append((None, "populated credential field in JSON"))
+        except (ValueError, UnicodeDecodeError):
+            pass
     if path == "release/config.json":
         try:
             config = json.loads(data)

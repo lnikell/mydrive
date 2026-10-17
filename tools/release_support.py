@@ -17,15 +17,20 @@ class ReleaseError(RuntimeError):
 
 
 def run(args, *, cwd=ROOT, capture=False, input=None, env=None, timeout=1800):
-    result = subprocess.run([str(x) for x in args], cwd=cwd, input=input,
-                            stdout=subprocess.PIPE if capture else None,
-                            stderr=subprocess.PIPE if capture else None,
-                            text=True, env=env, timeout=timeout)
+    program = Path(args[0]).name
+    try:
+        result = subprocess.run([str(x) for x in args], cwd=cwd, input=input,
+                                stdout=subprocess.PIPE if capture else None,
+                                stderr=subprocess.PIPE if capture else None,
+                                text=True, env=env, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # These exceptions stringify their full command and can retain output.
+        # Never let a CLI printer or traceback expose signing credentials.
+        raise ReleaseError(f"{program} exceeded its time limit.") from None
+    except subprocess.CalledProcessError as error:
+        raise ReleaseError(f"{program} failed (exit {error.returncode}).") from None
     if result.returncode:
-        # Arguments may contain paths to credentials, and tools can echo their
-        # inputs. Keep failures useful without dumping secret-bearing commands.
-        detail = result.stderr.strip() if capture and args[0] == "git" else ""
-        raise ReleaseError(f"{Path(args[0]).name} failed (exit {result.returncode}). {detail}".strip())
+        raise ReleaseError(f"{program} failed (exit {result.returncode}).")
     return result.stdout.strip() if capture else None
 
 
