@@ -1,0 +1,61 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: mydrive-stable-release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 90
+    # Add signing secrets to this environment. No reviewer is required for
+    # autonomous releases unless the repository owner chooses to require one.
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select the tested Rust toolchain
+        run: rustup toolchain install 1.93.0 --profile minimal --component clippy
+      - name: Build, notarize and verify (or recover the exact prepared release)
+        id: prepare
+        env:
+          RUSTUP_TOOLCHAIN: 1.93.0
+          GH_TOKEN: ${{ github.token }}
+          MYDRIVE_CERTIFICATE_P12_BASE64: ${{ secrets.MYDRIVE_CERTIFICATE_P12_BASE64 }}
+          MYDRIVE_CERTIFICATE_PASSWORD: ${{ secrets.MYDRIVE_CERTIFICATE_PASSWORD }}
+          MYDRIVE_SIGN_IDENTITY: ${{ vars.MYDRIVE_SIGN_IDENTITY }}
+          MYDRIVE_HOST_PROFILE_BASE64: ${{ secrets.MYDRIVE_HOST_PROFILE_BASE64 }}
+          MYDRIVE_PROVIDER_PROFILE_BASE64: ${{ secrets.MYDRIVE_PROVIDER_PROFILE_BASE64 }}
+          MYDRIVE_SPARKLE_PRIVATE_KEY: ${{ secrets.MYDRIVE_SPARKLE_PRIVATE_KEY }}
+          MYDRIVE_NOTARY_KEY_BASE64: ${{ secrets.MYDRIVE_NOTARY_KEY_BASE64 }}
+          MYDRIVE_NOTARY_KEY_ID: ${{ vars.MYDRIVE_NOTARY_KEY_ID }}
+          MYDRIVE_NOTARY_ISSUER_ID: ${{ vars.MYDRIVE_NOTARY_ISSUER_ID }}
+        run: python3 tools/ci-release.py prepare
+      - name: Preserve the exact signed artifacts for publish retries
+        if: steps.prepare.outputs.reused != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.prepare.outputs.artifact_name }}
+          path: ${{ steps.prepare.outputs.folder }}
+          retention-days: 30
+          if-no-files-found: error
+      - name: Publish verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MYDRIVE_CERTIFICATE_P12_BASE64: ${{ secrets.MYDRIVE_CERTIFICATE_P12_BASE64 }}
+          MYDRIVE_CERTIFICATE_PASSWORD: ${{ secrets.MYDRIVE_CERTIFICATE_PASSWORD }}
+          MYDRIVE_SIGN_IDENTITY: ${{ vars.MYDRIVE_SIGN_IDENTITY }}
+          MYDRIVE_HOST_PROFILE_BASE64: ${{ secrets.MYDRIVE_HOST_PROFILE_BASE64 }}
+          MYDRIVE_PROVIDER_PROFILE_BASE64: ${{ secrets.MYDRIVE_PROVIDER_PROFILE_BASE64 }}
+          MYDRIVE_SPARKLE_PRIVATE_KEY: ${{ secrets.MYDRIVE_SPARKLE_PRIVATE_KEY }}
+          MYDRIVE_NOTARY_KEY_BASE64: ${{ secrets.MYDRIVE_NOTARY_KEY_BASE64 }}
+          MYDRIVE_NOTARY_KEY_ID: ${{ vars.MYDRIVE_NOTARY_KEY_ID }}
+          MYDRIVE_NOTARY_ISSUER_ID: ${{ vars.MYDRIVE_NOTARY_ISSUER_ID }}
+        run: python3 tools/ci-release.py publish

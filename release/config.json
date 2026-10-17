@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "repository": "lnikell/mydrive",
+  "team_id": null,
+  "keychain_access_group": null,
+  "sparkle_public_key": "e0fpIITLBSyd6thp9/OKZQc2DI9MrSQD3zmMeEGeJK8=",
+  "app_bundle_id": "local.mydrive.app",
+  "provider_bundle_id": "local.mydrive.app.provider",
+  "app_group_id": "group.local.mydrive"
+}

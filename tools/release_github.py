@@ -1,0 +1,114 @@
+"""Draft-first GitHub publication. Existing assets are verified, never clobbered."""
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+
+from release_support import VERSION_RE, ReleaseError, digest
+
+
+class GitHub:
+    def __init__(self, repository):
+        self.repository = repository
+
+    def api(self, path, *, method="GET", body=None, missing_ok=False):
+        command = ["gh", "api", path, "--method", method]
+        if body is not None:
+            command += ["--input", "-"]
+        result = subprocess.run(command, input=json.dumps(body) if body is not None else None,
+                                text=True, capture_output=True, timeout=120)
+        if result.returncode:
+            if missing_ok and "(HTTP 404)" in result.stderr:
+                return None
+            raise ReleaseError(f"GitHub API request failed for {path}. Check gh authentication and repository access.")
+        return json.loads(result.stdout) if result.stdout.strip() else None
+
+    def asset_bytes(self, asset, destination):
+        # gh handles auth without placing a token in argv or source files.
+        with destination.open("wb") as output:
+            result = subprocess.run(["gh", "api", f"repos/{self.repository}/releases/assets/{asset['id']}",
+                                     "--header", "Accept: application/octet-stream"],
+                                    stdout=output, stderr=subprocess.PIPE, timeout=300)
+        if result.returncode:
+            raise ReleaseError("Could not verify the uploaded release asset.")
+
+    def verify_asset(self, asset, path):
+        if asset.get("state") != "uploaded" or asset.get("size") != path.stat().st_size:
+            raise ReleaseError(f"Uploaded asset is incomplete: {path.name}")
+        expected = "sha256:" + digest(path)
+        if asset.get("digest"):
+            if asset["digest"] != expected:
+                raise ReleaseError(f"Uploaded asset differs: {path.name}. It will not be overwritten.")
+        else:
+            with tempfile.TemporaryDirectory(prefix="mydrive-upload-check-") as temporary:
+                downloaded = Path(temporary) / "asset"
+                self.asset_bytes(asset, downloaded)
+                if digest(downloaded) != digest(path):
+                    raise ReleaseError(f"Uploaded asset differs: {path.name}. It will not be overwritten.")
+
+    def upload(self, tag, path):
+        result = subprocess.run(["gh", "release", "upload", tag, str(path), "--repo", self.repository],
+                                capture_output=True, timeout=300)
+        if result.returncode:
+            raise ReleaseError(f"Upload failed for {path.name}. Keep the draft and rerun publish to verify/resume.")
+
+    def check_target(self, manifest):
+        repo = self.api(f"repos/{self.repository}")
+        if repo.get("private") is not False or repo.get("archived") is not False:
+            raise ReleaseError("Public automatic updates require the intended public, active repository.")
+        remote = self.api(f"repos/{self.repository}/commits/{manifest['tag']}")
+        if remote.get("sha") != manifest["commit"]:
+            raise ReleaseError("Push the exact release commit and tag to the configured repository first.")
+
+    def check_newer(self, manifest):
+        latest = self.api(f"repos/{self.repository}/releases/latest", missing_ok=True)
+        if latest is None or latest["tag_name"] == manifest["tag"]:
+            return
+        assets = [x for x in latest["assets"] if x["name"] == "release-manifest.json"]
+        if len(assets) != 1:
+            raise ReleaseError("The existing latest release has no MyDrive manifest; reconcile the feed before publishing.")
+        with tempfile.TemporaryDirectory(prefix="mydrive-latest-check-") as temporary:
+            path = Path(temporary) / "manifest.json"
+            self.asset_bytes(assets[0], path)
+            previous = json.loads(path.read_text())
+        old_version = previous.get("version", "")
+        if not isinstance(old_version, str) or not VERSION_RE.fullmatch(old_version):
+            raise ReleaseError("The published latest release has an invalid version manifest.")
+        if previous.get("repository") != manifest["repository"] or int(previous["build"]) >= int(manifest["build"]) \
+                or tuple(map(int, old_version.split("."))) >= tuple(map(int, manifest["version"].split("."))):
+            raise ReleaseError("A new release must increase both version and build over the published latest release.")
+
+    def publish(self, folder, manifest, notes):
+        self.check_target(manifest)
+        self.check_newer(manifest)
+        tag = manifest["tag"]
+        path = f"repos/{self.repository}/releases"
+        release = self.api(path + "/tags/" + tag, missing_ok=True)
+        if release is None:
+            release = self.api(path, method="POST", body={
+                "tag_name": tag, "target_commitish": manifest["commit"],
+                "name": f"MyDrive {manifest['version']}", "body": notes,
+                "draft": True, "prerelease": False})
+        if release.get("prerelease"):
+            raise ReleaseError("A prerelease cannot publish the stable update feed.")
+        expected = {p.name: p for p in folder.iterdir()}
+        assets = {x["name"]: x for x in release["assets"]}
+        if set(assets) - set(expected):
+            raise ReleaseError("The existing release contains unexpected assets. It will not be modified.")
+        for name, asset in assets.items():
+            self.verify_asset(asset, expected[name])
+        missing = set(expected) - set(assets)
+        if missing and not release["draft"]:
+            raise ReleaseError("A public release is incomplete. Public releases are never changed by this script.")
+        # appcast is uploaded after the archive/notes. Publication remains a
+        # single final transition, so users never see a feed with absent assets.
+        for name in sorted(missing, key=lambda n: (n == "appcast.xml", n)):
+            self.upload(tag, expected[name])
+        verified = self.api(f"{path}/{release['id']}")
+        if {x["name"] for x in verified["assets"]} != set(expected):
+            raise ReleaseError("The draft asset set changed during publication. Publication stopped.")
+        for asset in verified["assets"]:
+            self.verify_asset(asset, expected[asset["name"]])
+        if verified["draft"]:
+            self.api(f"{path}/{release['id']}", method="PATCH", body={"draft": False, "make_latest": "true"})
+        return f"https://github.com/{self.repository}/releases/tag/{tag}"

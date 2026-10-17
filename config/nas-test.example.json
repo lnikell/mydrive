@@ -1,0 +1,5 @@
+{
+  "host": "192.0.2.1:445",
+  "share": "mydrive-test",
+  "username": "mydrive-test"
+}
