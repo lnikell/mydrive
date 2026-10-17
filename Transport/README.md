@@ -38,9 +38,9 @@ the share root.
 | `operation.type` | Operation fields | Result |
 | --- | --- | --- |
 | `probe` | None | Authenticated share connection and negotiated security. |
-| `list` | `path`; optional `delete_scope` | Bounded pages, then exhaustive completion with the actual held directory's `entry`. |
-| `stat` | `path`; optional `delete_scope` | `entry`, or explicit `null` for a missing path. Permission/metadata failures are errors. |
-| `read` | `path`, new local `destination` | Full guarded hydration, confirmed `bytes` and same-handle `entry`. An owned partial local output is removed on failure. |
+| `list` | `path`; optional `delete_scope` or `tree_scope` | Bounded pages, then exhaustive completion with the actual held directory's `entry`. |
+| `stat` | `path`; optional `delete_scope` or `tree_scope` | `entry`, or explicit `null` for a missing path. Permission/metadata failures are errors. |
+| `read` | `path`, new local `destination`; optional `tree_scope` | Full guarded hydration, confirmed `bytes` and same-handle `entry`. An owned partial local output is removed on failure. |
 | `mutate` | Typed `request` | One durable mutation phase and its receipts. |
 | `reconcile` | The same frozen `request` | Read-only inspection of an interrupted phase; no blind mutation replay. |
 
@@ -138,6 +138,40 @@ parent, or must verify the present root identity. Descendant reads require both
 selection objects. After child removals change directory timestamps, the caller
 may persist a fresh empty-directory observation under its frozen identity/scope;
 files retain frozen versions. The helper itself only deletes empty directories.
+
+## New-tree staging fences
+
+The caller can construct a new private tree before its final exclusive rename.
+Optional `tree_scope` on list/stat/read/mutate/reconcile has this strict shape:
+
+```text
+{ layout_version: 2, arena_path,
+  arena: { index_number, created_filetime },
+  parent: { index_number, created_filetime } }
+```
+
+The arena **is the future payload root**, created directly in the final
+destination parent. Each descendant scratch node is created in its intended
+logical parent as `.mydrive-<UUID>.node`, then renamed within that same parent.
+Its allocation sidecars also remain in that parent. Normal NAS CREATE therefore
+determines access inheritance at the actual depth; no ACL inference, copying or
+static-policy allowlist is used. This does not preserve local Mac ACLs.
+
+The only move out of the scope is the complete arena root to a sibling under its
+frozen parent. That request requires the full expected root and both parent
+identities. The root's extra reservation is omitted for this exact move so it
+cannot block its own rename; the target handle and unchanged parent still guard
+the operation. A lost publication reply can reconcile the exact published object
+under that parent even after the arena pathname is absent. Descendant work keeps
+both arena and parent reservations. Empty abandoned-root deletion is guarded and
+nonrecursive; the published root is never removed as arena cleanup.
+
+The caller must persist creator receipts, verify every file and directory,
+complete artifact cleanup, and reject unresolved allocation paths before
+publication. Scope membership alone does not establish ownership or prove a
+clean manifest. Missing/older layout versions fail closed. Existing-tree
+replacement, an atomic deep snapshot against other writers, and native package
+save semantics are outside this transport contract.
 
 ## Security, bounds and file features
 

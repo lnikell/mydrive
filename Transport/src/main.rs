@@ -46,6 +46,7 @@ struct Args {
     directory: bool,
     mutation: Option<nas_transport::mutation::MutationRequest>,
     delete_scope: Option<nas_transport::mutation::DeleteScope>,
+    tree_scope: Option<nas_transport::mutation::TreeScope>,
 }
 
 impl Args {
@@ -65,6 +66,7 @@ impl Args {
             directory: false,
             mutation: None,
             delete_scope: None,
+            tree_scope: None,
         };
         let mut stdin = false;
         while let Some(arg) = input.next() {
@@ -213,10 +215,16 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
     };
     let result = match args.command.as_str() {
         "probe" => Ok(json!({})),
-        "stat" => nas
-            .stat_scoped(&args.paths[0], args.delete_scope.as_ref(), &cancelled)
-            .await
-            .map(|entry| json!({"entry":entry})),
+        "stat" => {
+            let entry = if let Some(scope) = &args.tree_scope {
+                nas.stat_tree_scoped(&args.paths[0], scope, &cancelled)
+                    .await
+            } else {
+                nas.stat_scoped(&args.paths[0], args.delete_scope.as_ref(), &cancelled)
+                    .await
+            };
+            entry.map(|entry| json!({"entry":entry}))
+        }
         "mutate" | "reconcile" => nas
             .mutate(
                 args.mutation.as_ref().expect("typed native mutation"),
@@ -228,25 +236,59 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
             .map(|result| json!(result)),
         "list" => {
             let mut pages = 0;
-            nas.list_scoped(args.paths.first().map_or("", String::as_str), args.pages, args.delete_scope.as_ref(), &cancelled, |entries| {
+            let page = |entries: Vec<nas_transport::Entry>| {
                 for entries in entries.chunks(1000) {
                     pages += 1;
-                    emit(json!({"type":"page","number":pages,"elapsed_ms":operation.elapsed().as_millis(),"entries":entries}))?;
+                    emit(
+                        json!({"type":"page","number":pages,"elapsed_ms":operation.elapsed().as_millis(),"entries":entries}),
+                    )?;
                 }
                 Ok(())
-            }).await.map(|listing| json!({"entries":listing.entries,"pages":pages,"complete":listing.complete,"entry":listing.entry}))
+            };
+            let listing = if let Some(scope) = &args.tree_scope {
+                nas.list_tree_scoped(
+                    args.paths.first().map_or("", String::as_str),
+                    args.pages,
+                    scope,
+                    &cancelled,
+                    page,
+                )
+                .await
+            } else {
+                nas.list_scoped(
+                    args.paths.first().map_or("", String::as_str),
+                    args.pages,
+                    args.delete_scope.as_ref(),
+                    &cancelled,
+                    page,
+                )
+                .await
+            };
+            listing.map(|listing| json!({"entries":listing.entries,"pages":pages,"complete":listing.complete,"entry":listing.entry}))
         }
-        "read" => nas
-            .download(
-                &args.paths[0],
-                Path::new(&args.paths[1]),
-                args.offset,
-                args.length,
-                &cancelled,
-                progress,
-            )
-            .await
-            .map(|download| json!({"bytes":download.bytes,"entry":download.entry})),
+        "read" => {
+            let download = if let Some(scope) = &args.tree_scope {
+                nas.download_tree_scoped(
+                    &args.paths[0],
+                    Path::new(&args.paths[1]),
+                    scope,
+                    &cancelled,
+                    progress,
+                )
+                .await
+            } else {
+                nas.download(
+                    &args.paths[0],
+                    Path::new(&args.paths[1]),
+                    args.offset,
+                    args.length,
+                    &cancelled,
+                    progress,
+                )
+                .await
+            };
+            download.map(|download| json!({"bytes":download.bytes,"entry":download.entry}))
+        }
         "prepare" => nas.prepare_experiment().await.map(|_| json!({})),
         "cleanup" => nas.cleanup_experiment().await.map(|_| json!({})),
         "write" => nas

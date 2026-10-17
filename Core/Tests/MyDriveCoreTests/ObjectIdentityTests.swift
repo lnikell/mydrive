@@ -48,7 +48,7 @@ import Testing
         let db = try SQLiteConnection(url: fixture.url, cacheKiB: 2_048)
         #expect(try db.scalarText("SELECT object_index_number FROM items WHERE id = ?", [.text(item.id)]) == "18446744073709551615")
         #expect(try db.scalarText("SELECT typeof(object_created_filetime) FROM items WHERE id = ?", [.text(item.id)]) == "text")
-        #expect(try db.scalarInt("PRAGMA user_version") == 7)
+        #expect(try db.scalarInt("PRAGMA user_version") == 8)
     }
 
     @Test func identityAdoptionPublishesOnceAndMissingLegacyMetadataCannotEraseIt() async throws {
@@ -154,8 +154,10 @@ import Testing
             INSERT INTO scan_entries VALUES('pending-scan','file','file',NULL,'opaque','opaque',42,NULL,NULL);
             CREATE TABLE observed_directories(item_id TEXT PRIMARY KEY);
             CREATE TABLE offline_policy(item_id TEXT PRIMARY KEY,policy TEXT);
-            CREATE TABLE operations(idempotency_key TEXT,state TEXT);
-            INSERT INTO operations VALUES('retained-intent','uncertain');
+            CREATE TABLE operations(sequence INTEGER PRIMARY KEY AUTOINCREMENT,idempotency_key TEXT UNIQUE,
+                item_id TEXT,intent TEXT,state TEXT,attempt_count INTEGER DEFAULT 0,
+                request_fingerprint TEXT,commit_fingerprint TEXT,result TEXT);
+            INSERT INTO operations(idempotency_key,item_id,intent,state) VALUES('retained-intent','old','{}','uncertain');
             CREATE TABLE catalog_changes(sequence INTEGER PRIMARY KEY AUTOINCREMENT,item_id TEXT,old_parent_id TEXT,new_parent_id TEXT);
             CREATE TRIGGER record_item_update AFTER UPDATE ON items BEGIN
                 INSERT INTO catalog_changes(item_id) VALUES(NEW.id);
@@ -165,7 +167,7 @@ import Testing
         let migrated = try Catalog(databaseURL: path)
         #expect(try await migrated.item(id: "old")?.entry.objectIdentity == nil)
         #expect(try db.scalarText("SELECT state FROM operations") == "uncertain")
-        #expect(try db.scalarInt("PRAGMA user_version") == 7)
+        #expect(try db.scalarInt("PRAGMA user_version") == 8)
         try await migrated.completeScan(.init(id: "pending-scan", parentID: Catalog.rootID))
         #expect(try await migrated.child(named: "file", in: Catalog.rootID)?.id == "old")
         #expect(try await migrated.generation() == 4)

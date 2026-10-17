@@ -14,13 +14,24 @@ pub use request::{
 mod scope;
 pub use scope::DeleteScope;
 
+#[path = "mutation_tree_scope.rs"]
+mod tree_scope;
+pub use tree_scope::TreeScope;
+
 /// A failed parent guard cannot authorize publication or erase prior receipts.
 pub(crate) fn parent_changed(request: &MutationRequest) -> MutationResult {
     fence_changed(request, "parent_changed")
 }
 
 pub(crate) fn scope_changed(request: &MutationRequest) -> MutationResult {
-    fence_changed(request, "scope_changed")
+    fence_changed(
+        request,
+        if request.tree_scope.is_some() {
+            "tree_scope_changed"
+        } else {
+            "scope_changed"
+        },
+    )
 }
 
 fn fence_changed(request: &MutationRequest, code: &'static str) -> MutationResult {

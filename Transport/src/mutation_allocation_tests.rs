@@ -73,6 +73,7 @@ fn request() -> MutationRequest {
             created_filetime: 6,
         },
         delete_scope: None,
+        tree_scope: None,
         destination: None,
         destination_parent: None,
         expected: None,

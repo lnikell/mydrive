@@ -5,6 +5,8 @@ extension Catalog {
     /// manifest drives one transaction; the bounded root receipt owns replay.
     func publishImport(_ record: ImportRecord, root: RemoteEntry) throws {
         let status = record.status, key = status.key
+        try requireImportLayout(record)
+        try requireImportChildrenComplete(key, publishKey: record.publishKey)
         try qualifyImportParent(record)
         guard status.verifiedNodes == status.tree.nodeCount,
               try database.scalarInt("SELECT count(*) FROM tree_import_nodes WHERE operation_key = ? AND verified_entry IS NOT NULL",

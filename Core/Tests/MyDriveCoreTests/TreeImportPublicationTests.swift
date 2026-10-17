@@ -20,7 +20,7 @@ import Testing
             }
             if try await trial.catalog.treeImportStatus(rootID: frozen.rootID)?.phase == .published { break }
         }
-        #expect(keys.count == 6) // Arena, two create/place pairs and publication.
+        #expect(keys.count == 4) // Arena is the root; one child create/place and publication.
         let reopened = try Catalog(databaseURL: trial.fixture.url)
         for key in keys {
             let owner = try #require(try await reopened.treeImportOwner(operationKey: key))
@@ -30,7 +30,7 @@ import Testing
     }
 
     @Test func canonicalChildKeyIsBoundBeforeRpcAndScratchAuthorityDoesNotChange() async throws {
-        let trial = try await ImportTrial(entries: [.init(path: "", kind: .directory)])
+        let trial = try await ImportTrial(entries: [.init(path: "", kind: .directory), importFile("body")])
         let frozen = try await trial.freeze()
         let first = try #require(try await trial.catalog.nextTreeImportWork(key: frozen.key).first)
         guard case .mutation(let step, let expected, _, _) = first else { throw CatalogError.invalidEntry }
@@ -49,7 +49,7 @@ import Testing
         let create = try #require(try await reopened.nextTreeImportWork(key: frozen.key).first)
         guard case .mutation(.create, let createIntent, _, _) = create else { throw CatalogError.invalidEntry }
         let duplicate = JournalIntent(itemID: createIntent.itemID, expectedVersion: nil,
-            action: createIntent.action, destinationPath: createIntent.destinationPath)
+            action: createIntent.action, payload: createIntent.payload, destinationPath: createIntent.destinationPath)
         // This is a private-parent operation, so only the manifest can qualify
         // it. Seed a prior canonical journal record to exercise dedupe recovery.
         let db = try SQLiteConnection(url: trial.fixture.url, cacheKiB: 2_048)

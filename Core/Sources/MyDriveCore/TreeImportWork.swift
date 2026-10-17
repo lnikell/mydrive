@@ -8,6 +8,7 @@ extension Catalog {
         try Self.validatePageSize(limit)
         return try database.transaction {
             let record = try importRecord(key), status = record.status
+            try requireImportLayout(record)
             if status.phase == .published { return [] }
             guard status.phase == .frozen else { throw CatalogError.invalidTransition }
             try qualifyImportParent(record)
@@ -51,6 +52,7 @@ extension Catalog {
             guard arena.objectIdentity != nil, let root = try importNode(key, path: ""), root.verified != nil else {
                 throw CatalogError.invalidTransition
             }
+            try requireImportChildrenComplete(key, publishKey: record.publishKey)
             return [try importMutationWork(record, step: .publish, node: root)]
         }
     }
@@ -60,6 +62,7 @@ extension Catalog {
     public func enqueueTreeImportChild(key: UUID, step: TreeImportStep, intent: JournalIntent) throws -> JournalOperation {
         try database.transaction {
             let record = try importRecord(key)
+            try requireImportLayout(record)
             guard record.status.phase == .frozen else { throw CatalogError.invalidTransition }
             try qualifyImportParent(record)
             let node = step == .arena ? nil : try importNode(key, id: intent.itemID)
@@ -68,6 +71,7 @@ extension Catalog {
                   Self.exact(expected.requestFingerprint, intent.requestFingerprint),
                   expected.idempotencyKey == intent.idempotencyKey else { throw CatalogError.idempotencyConflict }
             let operation = try matchingOperation(intent) ?? insertQualifiedOperation(intent)
+            try bindImportOperation(operation, rootKey: key, step: step)
             let childKey = operation.intent.idempotencyKey
             if childKey != expected.idempotencyKey {
                 switch step {
@@ -100,16 +104,16 @@ extension Catalog {
         guard let arenaIdentity = status.arena?.objectIdentity, let node else { throw CatalogError.invalidTransition }
         let payloadPath = node.spec.path.isEmpty ? status.payloadPath : Self.treeJoin(status.payloadPath, node.spec.path)
         if step == .create {
-            if let parent = node.parentPath {
-                guard try importNode(status.key, path: parent)?.placed != nil else { throw CatalogError.invalidTransition }
-            }
+            guard !node.spec.path.isEmpty, let parentPath = node.parentPath,
+                  let parent = try importNode(status.key, path: parentPath),
+                  let parentIdentity = parent.placed?.objectIdentity else { throw CatalogError.invalidTransition }
             let intent = JournalIntent(idempotencyKey: node.createKey, itemID: node.itemID, expectedVersion: nil,
-                action: .create(parentID: record.arenaID, name: Self.treeName(node.scratchPath), kind: node.spec.kind),
+                action: .create(parentID: parent.itemID, name: Self.treeName(node.scratchPath), kind: node.spec.kind),
                 payload: node.spec.payload, destinationPath: node.scratchPath)
-            return .mutation(step: step, intent: intent, parentIdentity: arenaIdentity, destinationParentIdentity: nil)
+            return .mutation(step: step, intent: intent, parentIdentity: parentIdentity, destinationParentIdentity: nil)
         }
         if step == .place {
-            guard let created = node.created else { throw CatalogError.invalidTransition }
+            guard !node.spec.path.isEmpty, let created = node.created else { throw CatalogError.invalidTransition }
             let destinationParent: RemoteObjectIdentity
             let parentID: String
             if let parentPath = node.parentPath {
@@ -122,14 +126,15 @@ extension Catalog {
                 expectedVersion: created.contentVersion, action: .move(parentID: parentID, name: Self.treeName(payloadPath)),
                 expectedMetadataVersion: created.metadataVersion, sourcePath: node.scratchPath,
                 destinationPath: payloadPath, baseEntry: created)
-            return .mutation(step: step, intent: intent, parentIdentity: arenaIdentity, destinationParentIdentity: destinationParent)
+            return .mutation(step: step, intent: intent, parentIdentity: destinationParent, destinationParentIdentity: destinationParent)
         }
         guard step == .publish, node.spec.path.isEmpty, let entry = node.verified,
               status.verifiedNodes == status.tree.nodeCount else { throw CatalogError.invalidTransition }
+        try requireImportChildrenComplete(status.key, publishKey: record.publishKey)
         let intent = JournalIntent(idempotencyKey: record.publishKey, itemID: status.rootID,
             expectedVersion: entry.contentVersion, action: .move(parentID: status.parentID, name: status.filename),
             expectedMetadataVersion: entry.metadataVersion, sourcePath: status.payloadPath,
             destinationPath: status.destinationPath, baseEntry: entry)
-        return .mutation(step: step, intent: intent, parentIdentity: arenaIdentity, destinationParentIdentity: status.scope.parentIdentity)
+        return .mutation(step: step, intent: intent, parentIdentity: status.scope.parentIdentity, destinationParentIdentity: status.scope.parentIdentity)
     }
 }

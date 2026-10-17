@@ -81,6 +81,7 @@ public struct TreeImportStatus: Sendable {
     public let parentID: String
     public let filename: String
     public let phase: Phase
+    public let layoutVersion: Int
     public let scope: TreeImportScope
     public let arenaPath: String
     public let payloadPath: String
@@ -89,6 +90,16 @@ public struct TreeImportStatus: Sendable {
     public let verifiedNodes: Int64
     public let blockedCode: String?
     public let result: MutationCommitResult?
+}
+
+/// A bounded canonical-journal history page. Typed parents come from immutable
+/// private observations, so cleanup does not adopt a newer live Catalog parent.
+public struct TreeImportOperation: Sendable {
+    public let sequence: Int64
+    public let operation: JournalOperation
+    public let step: TreeImportStep
+    public let parentIdentity: RemoteObjectIdentity
+    public let destinationParentIdentity: RemoteObjectIdentity?
 }
 
 public enum TreeImportWork: Sendable {

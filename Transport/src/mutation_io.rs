@@ -299,6 +299,10 @@ mod parent_tests;
 #[path = "mutation_scope_tests.rs"]
 mod scope_tests;
 
+#[cfg(test)]
+#[path = "mutation_tree_scope_tests.rs"]
+mod tree_scope_tests;
+
 impl Remote for MutationIO {
     async fn canonical_name(&mut self, path: &str, expected: &Entry) -> Result<String> {
         let handle = self.open(path, Open::Guarded).await?;

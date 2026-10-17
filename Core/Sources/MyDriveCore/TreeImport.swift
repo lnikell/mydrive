@@ -37,10 +37,14 @@ extension Catalog {
         try Self.validateTreePath(scope.parentPath, empty: true)
         try Self.requireDeleteIdentity(scope.parentIdentity)
         let destination = Self.treeJoin(scope.parentPath, name), arena = Self.treeJoin(scope.parentPath, scope.arenaName)
-        try Self.validateTreePath(destination); try Self.validateTreePath(Self.treeJoin(arena, "payload"))
+        try Self.validateTreePath(destination); try Self.validateTreePath(arena)
         if let requested = intent.destinationPath, !Self.exact(requested, destination) { throw CatalogError.invalidEntry }
         return try database.transaction {
-            if let existing = try matchingOperation(intent) { return try importRecord(existing.intent.idempotencyKey).status }
+            if let existing = try matchingOperation(intent) {
+                let record = try importRecord(existing.intent.idempotencyKey)
+                try requireImportLayout(record)
+                return record.status
+            }
             try requireDirectory(parentID)
             guard try item(id: intent.itemID) == nil,
                   let path = try relativePath(id: parentID), Self.exact(path, scope.parentPath) else { throw CatalogError.invalidParent }
@@ -61,12 +65,12 @@ extension Catalog {
             let operation = try insertQualifiedOperation(intent), key = operation.intent.idempotencyKey
             try database.execute("""
                 INSERT INTO tree_imports(operation_key,tree_id,node_count,total_bytes,digest,root_id,parent_id,filename,
-                    parent_path,parent_index,parent_created,arena_name,arena_id,arena_operation_key,publish_operation_key)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    parent_path,parent_index,parent_created,arena_name,arena_id,arena_operation_key,publish_operation_key,layout_version)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,2)
                 """, [.text(key.uuidString), .text(tree.id.uuidString), .integer(tree.nodeCount), .integer(tree.totalBytes),
                       .text(tree.sha256), .text(intent.itemID), .text(parentID), .text(name), .text(scope.parentPath),
                       .text(String(scope.parentIdentity.indexNumber)), .text(String(scope.parentIdentity.createdFiletime)),
-                      .text(scope.arenaName), .text("tree-arena:" + key.uuidString.lowercased()),
+                      .text(scope.arenaName), .text(intent.itemID),
                       .text(Self.treeKey(key, "arena").uuidString), .text(Self.treeKey(key, "publish").uuidString)])
             return try importRecord(key).status
         }
@@ -81,6 +85,7 @@ extension Catalog {
         for entry in entries { try Self.validateTreeEntry(entry) }
         return try database.transaction {
             let record = try importRecord(key), status = record.status
+            try requireImportLayout(record)
             guard status.phase == .building else { throw CatalogError.invalidTransition }
             var addedCount: Int64 = 0, addedBytes: Int64 = 0
             for entry in entries {
@@ -104,7 +109,9 @@ extension Catalog {
                 }
                 guard try item(id: itemID) == nil else { throw CatalogError.invalidEntry }
                 let createKey = Self.treeKey(key, "create", entry.path), placeKey = Self.treeKey(key, "place", entry.path)
-                let scratch = Self.treeJoin(status.arenaPath, ".mydrive-" + createKey.uuidString.lowercased() + ".node")
+                let parentTarget = parentPath.map { $0.isEmpty ? status.payloadPath : Self.treeJoin(status.payloadPath, $0) } ?? status.scope.parentPath
+                let scratch = entry.path.isEmpty ? status.arenaPath :
+                    Self.treeJoin(parentTarget, ".mydrive-" + createKey.uuidString.lowercased() + ".node")
                 try Self.validateTreePath(scratch)
                 try Self.validateTreePath(entry.path.isEmpty ? status.payloadPath : Self.treeJoin(status.payloadPath, entry.path))
                 try database.execute("""

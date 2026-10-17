@@ -28,15 +28,21 @@ enum Operation {
         path: String,
         #[serde(default)]
         delete_scope: Option<nas_transport::mutation::DeleteScope>,
+        #[serde(default)]
+        tree_scope: Option<nas_transport::mutation::TreeScope>,
     },
     Read {
         path: String,
         destination: String,
+        #[serde(default)]
+        tree_scope: Option<nas_transport::mutation::TreeScope>,
     },
     Stat {
         path: String,
         #[serde(default)]
         delete_scope: Option<nas_transport::mutation::DeleteScope>,
+        #[serde(default)]
+        tree_scope: Option<nas_transport::mutation::TreeScope>,
     },
     Mutate {
         request: nas_transport::mutation::MutationRequest,
@@ -71,31 +77,47 @@ impl Request {
         {
             return Err(Error::Input(INVALID));
         }
-        let (command, paths, mutation, delete_scope) = match self.operation {
-            Operation::Probe {} => ("probe", vec![], None, None),
-            Operation::List { path, delete_scope } if !path.contains('\0') => {
-                ("list", vec![path], None, delete_scope)
+        let (command, paths, mutation, delete_scope, tree_scope) = match self.operation {
+            Operation::Probe {} => ("probe", vec![], None, None, None),
+            Operation::List {
+                path,
+                delete_scope,
+                tree_scope,
+            } if !path.contains('\0') => ("list", vec![path], None, delete_scope, tree_scope),
+            Operation::Read {
+                path,
+                destination,
+                tree_scope,
+            } if valid_text(&path) && valid_text(&destination) => {
+                ("read", vec![path, destination], None, None, tree_scope)
             }
-            Operation::Read { path, destination }
-                if valid_text(&path) && valid_text(&destination) =>
-            {
-                ("read", vec![path, destination], None, None)
-            }
-            Operation::Stat { path, delete_scope } if !path.contains('\0') => {
-                ("stat", vec![path], None, delete_scope)
-            }
+            Operation::Stat {
+                path,
+                delete_scope,
+                tree_scope,
+            } if !path.contains('\0') => ("stat", vec![path], None, delete_scope, tree_scope),
             Operation::Mutate { request } => {
                 request.validate()?;
-                ("mutate", vec![], Some(request), None)
+                ("mutate", vec![], Some(request), None, None)
             }
             Operation::Reconcile { request } => {
                 request.validate()?;
-                ("reconcile", vec![], Some(request), None)
+                ("reconcile", vec![], Some(request), None, None)
             }
             _ => return Err(Error::Input(INVALID)),
         };
         if let Some(scope) = &delete_scope {
             scope.validate_path(&paths[0])?;
+        }
+        if delete_scope.is_some() && tree_scope.is_some() {
+            return Err(Error::Input(INVALID));
+        }
+        if let Some(scope) = &tree_scope {
+            if command == "read" {
+                scope.validate_payload_path(&paths[0])?;
+            } else {
+                scope.validate_path(&paths[0])?;
+            }
         }
         Ok((
             Args {
@@ -113,6 +135,7 @@ impl Request {
                 directory: false,
                 mutation,
                 delete_scope,
+                tree_scope,
             },
             self.password,
         ))
@@ -187,6 +210,79 @@ mod tests {
         }
         assert!(parse(request(json!({"type":"probe","delete_scope":scope}))).is_err());
         assert!(parse(request(json!({"type":"read","path":"cafe\u{301}/file", "destination":"/tmp/file", "delete_scope":scope}))).is_err());
+    }
+
+    #[test]
+    fn tree_reads_and_mutations_have_one_exclusive_exact_scope_shape() {
+        let scope = json!({"layout_version":2,"arena_path":"cafe\u{301}",
+            "arena":{"index_number":2,"created_filetime":3},
+            "parent":{"index_number":4,"created_filetime":5}});
+        for kind in ["list", "stat"] {
+            let (args, _) = parse(request(json!({"type":kind,"path":"cafe\u{301}/payload",
+                "tree_scope":scope})))
+            .unwrap();
+            assert_eq!(
+                args.tree_scope.unwrap().arena_path.as_bytes(),
+                "cafe\u{301}".as_bytes()
+            );
+            for path in ["café/payload", "cafe\u{301}-sibling/payload", ""] {
+                assert!(
+                    parse(request(json!({"type":kind,"path":path,"tree_scope":scope}))).is_err()
+                );
+            }
+            assert!(
+                parse(request(json!({"type":kind,"path":"cafe\u{301}/payload",
+                "tree_scope":scope,"delete_scope":{"root_path":"cafe\u{301}",
+                    "root":{"index_number":2,"created_filetime":3},
+                    "parent":{"index_number":4,"created_filetime":5}}})))
+                .is_err()
+            );
+        }
+        for kind in ["mutate", "reconcile"] {
+            let intent = json!({"kind":"create_directory","operation_id":"11111111-2222-4333-8444-555555555555",
+                "path":"cafe\u{301}/.mydrive-11111111-2222-4333-8444-555555555555.node",
+                "parent":{"index_number":2,"created_filetime":3},"tree_scope":scope});
+            let (args, _) = parse(request(json!({"type":kind,"request":intent}))).unwrap();
+            assert!(args.mutation.unwrap().tree_scope.is_some());
+        }
+        assert!(parse(request(json!({"type":"probe","tree_scope":scope}))).is_err());
+        let (args, _) = parse(request(
+            json!({"type":"read","path":"cafe\u{301}/payload/file",
+            "destination":"/tmp/file","tree_scope":scope}),
+        ))
+        .unwrap();
+        assert!(args.tree_scope.is_some());
+        for path in ["cafe\u{301}", "outside/file"] {
+            assert!(parse(request(json!({"type":"read","path":path,
+                "destination":"/tmp/file","tree_scope":scope})))
+            .is_err());
+        }
+        for version in [None, Some(1), Some(3)] {
+            let mut old = scope.clone();
+            if let Some(value) = version {
+                old["layout_version"] = json!(value);
+            } else {
+                old.as_object_mut().unwrap().remove("layout_version");
+            }
+            for kind in ["stat", "list"] {
+                assert!(parse(request(
+                    json!({"type":kind,"path":"cafe\u{301}","tree_scope":old})
+                ))
+                .is_err());
+            }
+            assert!(
+                parse(request(json!({"type":"read","path":"cafe\u{301}/file",
+                "destination":"/tmp/file","tree_scope":old})))
+                .is_err()
+            );
+            for kind in ["mutate", "reconcile"] {
+                assert!(parse(request(json!({"type":kind,"request":{
+                    "kind":"create_directory","operation_id":"11111111-2222-4333-8444-555555555555",
+                    "path":"cafe\u{301}/.mydrive-11111111-2222-4333-8444-555555555555.node",
+                    "parent":{"index_number":2,"created_filetime":3},"tree_scope":old}})))
+                .is_err());
+            }
+        }
     }
 
     #[test]

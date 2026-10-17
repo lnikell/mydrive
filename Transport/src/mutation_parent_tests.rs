@@ -223,6 +223,7 @@ fn parent_refusal_retains_existing_recovery_evidence() {
             created_filetime: 20,
         },
         delete_scope: None,
+        tree_scope: None,
         destination: None,
         destination_parent: None,
         expected: Some(entry.clone()),

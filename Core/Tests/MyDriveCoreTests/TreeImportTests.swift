@@ -75,6 +75,7 @@ import Testing
         }
         let status = try await trial.catalog.recordTreeImportProgress(key: frozen.key,
             update: .committed(step: step, key: operation.intent.idempotencyKey, entry: entry, sha256: nil))
+        trial.observeArena(entry)
         #expect(status.arena?.objectIdentity == entry.objectIdentity)
         #expect(try await trial.catalog.knownItems().isEmpty)
         let reopened = try Catalog(databaseURL: trial.fixture.url)
@@ -118,6 +119,15 @@ import Testing
         #expect(try await reopened.mutationResult(key: frozen.key) == finished.result)
         #expect(try await reopened.nextTreeImportWork(key: frozen.key).isEmpty)
         #expect(try await reopened.treeImportStatus(rootID: frozen.rootID)?.phase == .published)
+        var sequence: Int64?, historyCount = 0
+        while true {
+            let page = try await reopened.treeImportOperations(key: frozen.key, afterSequence: sequence, limit: 37)
+            #expect(page.count <= 37)
+            guard let last = page.last else { break }
+            #expect(page.allSatisfy { $0.operation.state == .completed })
+            historyCount += page.count; sequence = last.sequence
+        }
+        #expect(historyCount == 2_052) // Arena+publish and two operations for each non-root.
         let db = try SQLiteConnection(url: trial.fixture.url, cacheKiB: 2_048)
         #expect(try db.scalarInt("SELECT count(*) FROM items WHERE is_deleted = 0 AND id != 'root'") == 1_026)
         #expect(try db.scalarInt("SELECT length(result) FROM operations WHERE idempotency_key = ?", [.text(frozen.key.uuidString)]) < 4_096)

@@ -7,6 +7,7 @@ extension Catalog {
     public func recordTreeImportProgress(key: UUID, update: TreeImportProgress) throws -> TreeImportStatus {
         try database.transaction {
             let record = try importRecord(key)
+            try requireImportLayout(record)
             guard record.status.phase == .frozen || record.status.phase == .published else { throw CatalogError.invalidTransition }
             switch update {
             case .committed(let step, let childKey, let entry, let sha256):
@@ -74,9 +75,12 @@ extension Catalog {
         switch step {
         case .arena:
             try validateImportObservation(entry, kind: .directory, name: status.scope.arenaName)
-            guard sha256 == nil else { throw CatalogError.invalidEntry }
+            guard sha256 == nil, let root = try importNode(status.key, path: ""),
+                  root.spec.kind == .directory, root.itemID == record.arenaID else { throw CatalogError.invalidEntry }
             try database.execute("UPDATE tree_imports SET arena_entry = ?, blocked_code = NULL WHERE operation_key = ?",
                                  [.text(try Self.treeEncode(entry)), .text(status.key.uuidString)])
+            try database.execute("UPDATE tree_import_nodes SET created_entry = ?, placed_entry = ? WHERE operation_key = ? AND path = ''",
+                                 [.text(try Self.treeEncode(entry)), .text(try Self.treeEncode(entry)), .text(status.key.uuidString)])
         case .create:
             guard let node else { throw CatalogError.invalidTransition }
             try validateImportObservation(entry, kind: node.spec.kind, name: Self.treeName(node.scratchPath))

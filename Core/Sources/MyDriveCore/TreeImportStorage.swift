@@ -34,8 +34,10 @@ extension Catalog {
                 WHERE operation_key = ? OR arena_operation_key = ? OR publish_operation_key = ?
             UNION
             SELECT operation_key FROM tree_import_nodes WHERE create_operation_key = ? OR place_operation_key = ?
+            UNION
+            SELECT root_key FROM tree_import_operations WHERE operation_key = ?
             LIMIT 2
-            """, Array(repeating: .text(operationKey.uuidString), count: 5)) { row in
+            """, Array(repeating: .text(operationKey.uuidString), count: 6)) { row in
                 guard try row.step() else { return nil }
                 guard let owner = UUID(uuidString: row.text(0)), try !row.step() else {
                     throw CatalogError.invalidTransition
@@ -107,7 +109,7 @@ extension Catalog {
         try database.statement("""
             SELECT tree_id,node_count,total_bytes,digest,root_id,parent_id,filename,phase,
                 parent_path,parent_index,parent_created,arena_name,arena_id,arena_operation_key,publish_operation_key,
-                arena_entry,verified_nodes,blocked_code
+                arena_entry,verified_nodes,blocked_code,layout_version
             FROM tree_imports WHERE operation_key = ?
             """, [.text(key.uuidString)]) { row in
                 guard try row.step(), let treeID = UUID(uuidString: row.text(0)),
@@ -121,8 +123,9 @@ extension Catalog {
                 let arenaPath = Self.treeJoin(scope.parentPath, scope.arenaName)
                 return ImportRecord(status: TreeImportStatus(key: key,
                     tree: .init(id: treeID, nodeCount: row.integer(1), totalBytes: row.integer(2), sha256: row.text(3)),
-                    rootID: row.text(4), parentID: row.text(5), filename: row.text(6), phase: phase, scope: scope,
-                    arenaPath: arenaPath, payloadPath: Self.treeJoin(arenaPath, "payload"),
+                    rootID: row.text(4), parentID: row.text(5), filename: row.text(6), phase: phase,
+                    layoutVersion: Int(row.integer(18)), scope: scope,
+                    arenaPath: arenaPath, payloadPath: row.integer(18) == 2 ? arenaPath : Self.treeJoin(arenaPath, "payload"),
                     destinationPath: Self.treeJoin(scope.parentPath, row.text(6)),
                     arena: try row.optionalText(15).map { try Self.treeDecode(RemoteEntry.self, $0) },
                     verifiedNodes: row.integer(16), blockedCode: row.optionalText(17), result: try mutationResult(key: key)),
@@ -166,6 +169,10 @@ extension Catalog {
                 throw CatalogError.invalidParent
             }
         }
+    }
+
+    func requireImportLayout(_ record: ImportRecord) throws {
+        guard record.status.layoutVersion == 2 else { throw CatalogError.invalidTransition }
     }
 
     func validateImportObservation(_ entry: RemoteEntry, kind: ItemKind, name: String,

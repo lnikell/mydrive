@@ -290,6 +290,7 @@ async fn ignored_or_denied_security_at_create_never_uploads_or_archives_bytes() 
                 created_filetime: 6,
             },
             delete_scope: None,
+            tree_scope: None,
             destination: None,
             destination_parent: None,
             expected: Some(Entry {
@@ -411,6 +412,7 @@ async fn prepared_receipt_observes_and_hashes_the_closed_writer() {
             created_filetime: 6,
         },
         delete_scope: None,
+        tree_scope: None,
         destination: None,
         destination_parent: None,
         expected: None,

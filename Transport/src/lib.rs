@@ -46,6 +46,8 @@ pub enum Error {
     Changed,
     #[error("the frozen recursive deletion selection changed")]
     ScopeChanged,
+    #[error("the private new-tree arena or its parent changed")]
+    TreeScopeChanged,
     #[error("the directory is not empty")]
     DirectoryNotEmpty,
     #[error("a dispatched mutation could not be verified; reconcile before retrying")]
@@ -64,6 +66,7 @@ impl Error {
             Self::Cleanup => "cleanup_timeout",
             Self::Changed => "changed",
             Self::ScopeChanged => "scope_changed",
+            Self::TreeScopeChanged => "tree_scope_changed",
             Self::DirectoryNotEmpty => "directory_not_empty",
             Self::CommitUncertain => "commit_uncertain",
             Self::Io(_) => "local_io",
@@ -107,6 +110,13 @@ impl From<std::io::Error> for Error {
     }
 }
 pub type Result<T> = std::result::Result<T, Error>;
+
+fn tree_scope_error(error: Error) -> Error {
+    match error {
+        Error::ScopeChanged => Error::TreeScopeChanged,
+        other => other,
+    }
+}
 
 /// Credentials are never serialized. The upstream client retains a password
 /// copy for its session; this input copy is cleared when connection completes.
@@ -286,6 +296,18 @@ impl Nas {
         result.and_then(|entry| closed.map(|()| entry))
     }
 
+    pub async fn stat_tree_scoped(
+        &self,
+        path: &str,
+        scope: &mutation::TreeScope,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Entry>> {
+        scope.validate_path(path)?;
+        self.stat_scoped(path, Some(&scope.fence()), cancel)
+            .await
+            .map_err(tree_scope_error)
+    }
+
     /// The complete intent must already be durable in the caller. `prepared`
     /// requires persisting its receipt before a second invocation publishes.
     pub async fn mutate(
@@ -305,6 +327,9 @@ impl Nas {
                     .is_some_and(|path| !path.starts_with(&prefix))
                 || request.delete_scope.as_ref().is_some_and(|scope| {
                     scope.root_path != *root && !scope.root_path.starts_with(&prefix)
+                })
+                || request.tree_scope.as_ref().is_some_and(|scope| {
+                    scope.arena_path != *root && !scope.arena_path.starts_with(&prefix)
                 })
             {
                 return Err(Error::Input(
@@ -396,6 +421,56 @@ impl Nas {
             page,
         )
         .await
+    }
+
+    pub async fn list_tree_scoped(
+        &mut self,
+        path: &str,
+        page_limit: Option<usize>,
+        scope: &mutation::TreeScope,
+        cancel: &CancellationToken,
+        page: impl FnMut(Vec<Entry>) -> Result<()>,
+    ) -> Result<Listing> {
+        scope.validate_path(path)?;
+        self.list_scoped(path, page_limit, Some(&scope.fence()), cancel, page)
+            .await
+            .map_err(tree_scope_error)
+    }
+
+    /// Full readback keeps both arena fences alive through the ordinary
+    /// same-handle content validation. A separate path stat is not a fence.
+    pub async fn download_tree_scoped(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        scope: &mutation::TreeScope,
+        cancel: &CancellationToken,
+        progress: impl FnMut(u64),
+    ) -> Result<Download> {
+        scope.validate_payload_path(remote)?;
+        let fences = mutation_io::MutationIO::for_scoped_read(
+            self.client.connection().clone(),
+            &self.tree,
+            remote,
+            Some(&scope.fence()),
+            cancel,
+        )
+        .await
+        .map_err(tree_scope_error)?;
+        let result = self
+            .download(remote, local, 0, None, cancel, progress)
+            .await;
+        let closed = fences.close_checked().await.map_err(tree_scope_error);
+        match (result, closed) {
+            (Ok(download), Ok(())) => Ok(download),
+            (Ok(_), Err(error)) => {
+                // download() exclusively created this destination. Never
+                // remove a preexisting destination after an open failure.
+                let _ = tokio::fs::remove_file(local).await;
+                Err(error)
+            }
+            (Err(error), _) => Err(error),
+        }
     }
 
     /// Writes a new local destination, using eight positioned reads of at most

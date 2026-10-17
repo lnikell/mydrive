@@ -123,6 +123,8 @@ final class ImportTrial {
             .sorted { $0.name.utf8.lexicographicallyPrecedes($1.name.utf8) }
     }
 
+    func observeArena(_ entry: RemoteEntry) { objects[intent.itemID] = (Catalog.rootID, entry) }
+
     func directoryTerminal(_ id: String) throws -> RemoteEntry {
         guard let object = objects[id], object.entry.kind == .directory else { throw CatalogError.invalidEntry }
         let old = object.entry
@@ -159,9 +161,10 @@ func importTreeReference(_ entries: [TreeImportEntry]) throws -> StagedTreeRefer
     return try digest.reference(id: UUID())
 }
 
-func insertTreeTestOperation(_ intent: JournalIntent, in db: SQLiteConnection) throws {
+func insertTreeTestOperation(_ intent: JournalIntent, in db: SQLiteConnection,
+                             state: JournalState = .queued, fingerprint: Bool = true) throws {
     let data = try JSONEncoder().encode(intent)
-    try db.execute("INSERT INTO operations(idempotency_key,item_id,intent,state,request_fingerprint) VALUES(?,?,?,'queued',?)",
+    try db.execute("INSERT INTO operations(idempotency_key,item_id,intent,state,request_fingerprint) VALUES(?,?,?,?,?)",
         [.text(intent.idempotencyKey.uuidString), .text(intent.itemID), .text(String(decoding: data, as: UTF8.self)),
-         .text(intent.requestFingerprint)])
+         .text(state.rawValue), fingerprint ? .text(intent.requestFingerprint) : .null])
 }

@@ -85,6 +85,8 @@ pub struct MutationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delete_scope: Option<super::DeleteScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tree_scope: Option<super::TreeScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_parent: Option<DirectoryIdentity>,
@@ -119,6 +121,11 @@ pub struct MutationResult {
 
 impl MutationRequest {
     pub fn validate(&self) -> Result<()> {
+        if self.delete_scope.is_some() && self.tree_scope.is_some() {
+            return Err(Error::Input(
+                "a mutation cannot combine tree and deletion scopes",
+            ));
+        }
         if !canonical_uuid(&self.operation_id) {
             return Err(Error::Input("invalid mutation operation ID"));
         }
@@ -256,6 +263,9 @@ impl MutationRequest {
                 return Err(Error::Input("mutation has inconsistent deletion fences"));
             }
         }
+        if let Some(scope) = &self.tree_scope {
+            scope.validate_mutation(self)?;
+        }
         Ok(())
     }
 
@@ -275,6 +285,12 @@ impl MutationRequest {
     }
 
     pub(crate) fn scope_snapshots(&self) -> Vec<(&str, DirectoryIdentity)> {
+        if let Some(scope) = &self.tree_scope {
+            // Only the exact root publication or empty-root deletion can
+            // reach this path. validate() requires the full target identity;
+            // move/remove holds that target without a conflicting self-open.
+            return scope.snapshots(self.path == scope.arena_path);
+        }
         self.delete_scope.as_ref().map_or_else(Vec::new, |scope| {
             // validate() requires the full target identity to match here.
             scope.snapshots(self.path == scope.root_path)
@@ -293,7 +309,7 @@ pub(crate) fn parent_path(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(parent, _)| parent)
 }
 
-fn canonical_uuid(value: &str) -> bool {
+pub(crate) fn canonical_uuid(value: &str) -> bool {
     value.len() == 36
         && value.bytes().enumerate().all(|(index, byte)| {
             if [8, 13, 18, 23].contains(&index) {

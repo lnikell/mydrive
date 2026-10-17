@@ -25,6 +25,7 @@ fn request(kind: MutationKind) -> MutationRequest {
             created_filetime: 6,
         },
         delete_scope: None,
+        tree_scope: None,
         destination: None,
         destination_parent: (kind == MutationKind::Move).then_some(DirectoryIdentity {
             index_number: 5,
@@ -742,4 +743,56 @@ async fn local_payload_hash_size_symlink_and_cancellation_preflight() {
         assert!(VerifiedPayload::open(&payload, &cancel).await.is_err());
     }
     tokio::fs::remove_dir_all(root).await.unwrap();
+}
+
+#[tokio::test]
+async fn layout2_root_lost_publication_reply_reconciles_without_an_arena_or_another_rename() {
+    let source = "folder/.mydrive-11111111-2222-4333-8444-555555555555.tree";
+    let destination = "folder/Imported folder";
+    let mut root = entry(source.rsplit('/').next().unwrap(), 1);
+    root.directory = true;
+    root.attributes = 18;
+    let mut request = request(MutationKind::Move);
+    request.path = source.into();
+    request.destination = Some(destination.into());
+    request.expected = Some(root.clone());
+    request.tree_scope = Some(TreeScope {
+        layout_version: 2,
+        arena_path: source.into(),
+        arena: DirectoryIdentity {
+            index_number: 1,
+            created_filetime: 101,
+        },
+        parent: request.parent,
+    });
+    request.validate().unwrap();
+    assert_eq!(request.scope_snapshots(), [("folder", request.parent)]);
+    let mut remote = Fake {
+        fail_rename: Some(1),
+        after_effect: true,
+        ..Default::default()
+    };
+    remote
+        .files
+        .insert(source.into(), (root.clone(), "directory".into()));
+    let result = run(&mut remote, &request, None, false, &mut |_| {}).await;
+    assert_eq!(result.outcome, Outcome::Uncertain);
+    assert!(!remote.files.contains_key(source));
+    let final_entry = remote.files[destination].0.clone();
+    let result = run(&mut remote, &request, None, true, &mut |_| {}).await;
+    assert_eq!(result.outcome, Outcome::Committed);
+    assert!(same_identity(result.entry.as_ref().unwrap(), &root));
+    assert_eq!(remote.renames, 1);
+    // A different object at the published pathname is never adopted, even if
+    // all lengths/timestamps happen to match the saved root receipt.
+    remote.files.get_mut(destination).unwrap().0.index_number = Some(99);
+    let result = run(&mut remote, &request, None, true, &mut |_| {}).await;
+    assert_eq!(result.outcome, Outcome::Conflict);
+    assert_eq!(remote.renames, 1);
+    assert_eq!(remote.files[destination].0.index_number, Some(99));
+    // The original remains recoverable in the frozen receipt, not a new stat.
+    assert_eq!(
+        request.expected.as_ref().unwrap().index_number,
+        final_entry.index_number
+    );
 }
