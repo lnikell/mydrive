@@ -92,7 +92,7 @@ import Testing
         try await capture(root, entries: [file("first", 2), file("second", 3)], key: status.key, in: catalog)
         let work = try await catalog.nextRecursiveDeleteWork(key: status.key)
         let rootOperation = try await catalog.enqueue(JournalIntent(idempotencyKey: mutationUUID(), itemID: root.id,
-            expectedVersion: root.entry.contentVersion, action: .delete, sourcePath: root.entry.name, baseEntry: root.entry))
+            expectedVersion: root.entry.contentVersion, action: .delete, expectedMetadataVersion: root.entry.metadataVersion, sourcePath: root.entry.name, baseEntry: root.entry))
         try await catalog.transitionOperation(key: rootOperation.intent.idempotencyKey, from: .queued, to: .executing)
         await #expect(throws: CatalogError.invalidTransition) {
             try await catalog.recordRecursiveDeleteProgress(key: status.key, updates: [

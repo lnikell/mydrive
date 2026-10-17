@@ -22,18 +22,7 @@ extension Catalog {
                           let node = try deleteNode(key: key, id: id) else {
                         throw CatalogError.invalidTransition
                     }
-                    try requireDeleteOperation(childKey, node: node)
-                    if node.removed {
-                        guard node.operationKey == childKey else { throw CatalogError.idempotencyConflict }
-                    } else if node.operationKey != childKey {
-                        // enqueue may deduplicate an identical pre-existing
-                        // normal delete. Persist its returned key before RPC.
-                        guard try operation(key: node.operationKey) == nil else { throw CatalogError.idempotencyConflict }
-                        try database.execute("""
-                            UPDATE recursive_delete_nodes SET child_operation_key = ?
-                            WHERE operation_key = ? AND item_id = ?
-                            """, [.text(childKey.uuidString), .text(key.uuidString), .text(id)])
-                    }
+                    try bindDeleteOperation(childKey, node: node, manifestKey: key)
                 case .blocked(let id, let code):
                     guard (1...256).contains(code.utf8.count), !code.contains("\0"),
                           let node = try deleteNode(key: key, id: id) else { throw CatalogError.invalidEntry }
@@ -118,14 +107,8 @@ extension Catalog {
 
     @discardableResult
     private func requireDeleteOperation(_ key: UUID, node: DeleteNode) throws -> JournalOperation {
-        guard let operation = try operation(key: key), case .delete = operation.intent.action,
-              Self.exact(operation.intent.itemID, node.item.id),
-              let path = operation.intent.sourcePath, Self.exact(path, node.path),
-              let base = operation.intent.baseEntry, base.kind == node.item.entry.kind,
-              Self.exact(base.name, node.item.entry.name), base.objectIdentity == node.item.entry.objectIdentity,
-              node.item.entry.kind == .directory || Self.exactEntry(base, node.item.entry) else {
-            throw CatalogError.idempotencyConflict
-        }
+        guard let operation = try operation(key: key) else { throw CatalogError.invalidTransition }
+        try validateDeleteIntent(operation.intent, node: node)
         return operation
     }
 }

@@ -15,24 +15,25 @@ extension Catalog {
         }
     }
 
-    func enqueueInTransaction(_ intent: JournalIntent) throws -> JournalOperation {
+    /// Only the recursive manifest boundary may qualify a retired snapshot.
+    func enqueueInTransaction(_ intent: JournalIntent, allowRetiredDelete: Bool = false) throws -> JournalOperation {
         if let existing = try operation(key: intent.idempotencyKey) {
             guard existing.intent.requestFingerprint == intent.requestFingerprint else {
                 throw CatalogError.idempotencyConflict
             }
             return existing
-    }
-    if let existing = try operation(requestFingerprint: intent.requestFingerprint) { return existing }
-    try validateIntent(intent)
-    let encoded = try JSONEncoder().encode(intent)
-    guard encoded.count <= 131_072 else { throw CatalogError.invalidEntry }
-    let json = String(decoding: encoded, as: UTF8.self)
-    try database.execute("""
-        INSERT INTO operations(idempotency_key, item_id, intent, state, request_fingerprint)
-        VALUES (?, ?, ?, 'queued', ?)
-        """, [.text(intent.idempotencyKey.uuidString), .text(intent.itemID), .text(json),
-              .text(intent.requestFingerprint)])
-    return JournalOperation(intent: intent, state: .queued, attemptCount: 0)
+        }
+        if let existing = try operation(requestFingerprint: intent.requestFingerprint) { return existing }
+        try validateIntent(intent, allowRetiredDelete: allowRetiredDelete)
+        let encoded = try JSONEncoder().encode(intent)
+        guard encoded.count <= 131_072 else { throw CatalogError.invalidEntry }
+        let json = String(decoding: encoded, as: UTF8.self)
+        try database.execute("""
+            INSERT INTO operations(idempotency_key, item_id, intent, state, request_fingerprint)
+            VALUES (?, ?, ?, 'queued', ?)
+            """, [.text(intent.idempotencyKey.uuidString), .text(intent.itemID), .text(json),
+                  .text(intent.requestFingerprint)])
+        return JournalOperation(intent: intent, state: .queued, attemptCount: 0)
     }
 
     /// Compare-and-transition prevents an old callback from overwriting newer
@@ -103,7 +104,7 @@ extension Catalog {
         }
     }
 
-    private func validateIntent(_ intent: JournalIntent) throws {
+    private func validateIntent(_ intent: JournalIntent, allowRetiredDelete: Bool = false) throws {
         guard intent.itemID != Self.rootID else { throw CatalogError.invalidTransition }
         try Self.validateMutationID(intent.itemID)
         if let path = intent.sourcePath { try Self.validateMutationPath(path) }
@@ -150,6 +151,10 @@ extension Catalog {
             guard intent.payload == nil else { throw CatalogError.invalidEntry }
         }
         guard intent.createTemplateID == nil else { throw CatalogError.invalidEntry }
+        if allowRetiredDelete {
+            guard case .delete = intent.action, intent.deletionContextID == nil else { throw CatalogError.invalidEntry }
+            return // Exact frozen-node validation was performed by the manifest boundary.
+        }
         guard let item = try item(id: intent.itemID), !item.isDeleted else {
             throw CatalogError.missingItem(intent.itemID)
         }
