@@ -40,6 +40,9 @@ if [[ "$(lipo -archs "$TASK_ROOT/Transport/target/release/nas-transport")" != "$
   echo "The NAS helper architecture does not match the requested app architecture." >&2
   exit 1
 fi
+# Retain complete upstream licenses before either bundle is signed. The app's
+# MIT license does not relicense Cargo dependencies or the Sparkle framework.
+python3 "$TASK_ROOT/tools/third_party_notices.py" --app "$TASK_APP" --sparkle "$TASK_SPARKLE"
 xcrun swiftc -sdk "$TASK_SDK" -target "$TASK_ARCH-apple-macosx15.0" -swift-version 6 -O \
   -parse-as-library -whole-module-optimization -emit-library -static -emit-module \
   -module-name MyDriveCore -I "$TASK_ROOT/Core/Sources/CSQLite" \

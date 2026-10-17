@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 from release_github import GitHub
 from release_repository import validate_origin
 from local_release import prerequisite_problems, release_environment
+from third_party_notices import NoticesError, verify_bundle as verify_notices
 from release_support import (ROOT, SPARKLE, VERSION_RE, MANIFEST_SCHEMA, ReleaseError, artifact_records,
                              configuration_problems, digest, release_config, run,
                              release_compatibility, source_commit, validate_appcast, validate_manifest, version_info)
@@ -84,6 +85,13 @@ def notarize(app, folder, config):
 
 
 def verify_app(app, config):
+    try:
+        version = plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleShortVersionString"]
+        if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
+            raise NoticesError("The bundled app version is unavailable.")
+        verify_notices(app, version)
+    except (NoticesError, OSError, KeyError, plistlib.InvalidFileException) as error:
+        raise ReleaseError("The complete bundled third-party notices must be retained: " + str(error)) from None
     run(["codesign", "--verify", "--deep", "--strict", app])
     for bundle, identifier in ((app, config["app_bundle_id"]),
                                (app / "Contents/PlugIns/MyDriveProvider.appex", config["provider_bundle_id"])):

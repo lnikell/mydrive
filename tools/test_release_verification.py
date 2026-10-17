@@ -15,6 +15,7 @@ import zipfile
 import release
 from release_github import GitHub
 from release_support import ReleaseError, SPARKLE, MANIFEST_SCHEMA, release_compatibility, validate_manifest
+import third_party_notices as notices
 
 
 CONFIG = dict(schema_version=1, repository="example/MyDrive", team_id="ABC1234567",
@@ -38,6 +39,16 @@ class ReleaseVerificationTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.app = self.root / "MyDrive.app"
         self.provider = self.app / "Contents/PlugIns/MyDriveProvider.appex"
+        components = [dict(kind=kind, name=name, version=number, license=license_name,
+                           files=[("LICENSE", b"Complete synthetic license text for a credential-free test.\n")])
+                      for kind, name, number, license_name in (("project", "MyDrive", VERSION["version"], "MIT"),
+                           ("cargo", "dependency", "1.0.0", "MIT"), ("sparkle", "Sparkle", "2.10.0", "See included LICENSE"))]
+        data = notices.render(components, VERSION["version"])
+        for bundle in (self.app, self.provider):
+            path = bundle / notices.RESOURCE
+            path.parent.mkdir(parents=True)
+            path.write_bytes(data)
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleShortVersionString": VERSION["version"]}))
 
     def verify_with_inspections(self, *, teams=None, entitlements=None):
         records = {
@@ -69,6 +80,19 @@ class ReleaseVerificationTests(unittest.TestCase):
         self.assertEqual(inspected, {self.app, self.provider})
         self.assertTrue(any(command[:3] == ["xcrun", "stapler", "validate"] for command in completed))
         self.assertTrue(any(command[0] == "spctl" for command in completed))
+
+    def test_missing_or_damaged_license_bundle_cannot_pass_release_verification(self):
+        path = self.provider / notices.RESOURCE
+        original = path.read_bytes()
+        for invalid in (None, b"", original[:-1]):
+            with self.subTest(invalid_size=None if invalid is None else len(invalid)):
+                if invalid is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(invalid)
+                with self.assertRaisesRegex(ReleaseError, "third-party notices"):
+                    self.verify_with_inspections()
+                path.write_bytes(original)
 
     def test_wrong_host_or_provider_team_is_rejected(self):
         for bundle in (self.app, self.provider):
