@@ -39,6 +39,12 @@ class ReleaseVerificationTests(unittest.TestCase):
         self.root = Path(temporary.name)
         self.app = self.root / "MyDrive.app"
         self.provider = self.app / "Contents/PlugIns/MyDriveProvider.appex"
+        # Use the actual checked-in icon; only signing/account commands below
+        # are mocked, while resource bytes and plist checks remain real.
+        self.icon = (release.ROOT / "MacApp/Resources/MyDrive.icns").read_bytes()
+        self.source_icon = self.root / "MacApp/Resources/MyDrive.icns"
+        self.source_icon.parent.mkdir(parents=True)
+        self.source_icon.write_bytes(self.icon)
         components = [dict(kind=kind, name=name, version=number, license=license_name,
                            files=[("LICENSE", b"Complete synthetic license text for a credential-free test.\n")])
                       for kind, name, number, license_name in (("project", "MyDrive", VERSION["version"], "MIT"),
@@ -48,7 +54,9 @@ class ReleaseVerificationTests(unittest.TestCase):
             path = bundle / notices.RESOURCE
             path.parent.mkdir(parents=True)
             path.write_bytes(data)
-            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({"CFBundleShortVersionString": VERSION["version"]}))
+            (bundle / "Contents/Info.plist").write_bytes(plistlib.dumps({
+                "CFBundleShortVersionString": VERSION["version"], "CFBundleIconFile": "MyDrive.icns"}))
+            (bundle / "Contents/Resources/MyDrive.icns").write_bytes(self.icon)
 
     def verify_with_inspections(self, *, teams=None, entitlements=None):
         records = {
@@ -70,7 +78,8 @@ class ReleaseVerificationTests(unittest.TestCase):
             inspected.add(bundle)
             return subprocess.CompletedProcess(arguments, 0, stdout=plistlib.dumps(records[bundle]), stderr=b"")
 
-        with patch.object(release, "run", side_effect=lambda arguments: completed.append(arguments)), \
+        with patch.object(release, "ROOT", self.root), \
+                patch.object(release, "run", side_effect=lambda arguments: completed.append(arguments)), \
                 patch.object(release.subprocess, "run", side_effect=codesign):
             release.verify_app(self.app, CONFIG)
         return inspected, completed
@@ -93,6 +102,56 @@ class ReleaseVerificationTests(unittest.TestCase):
                 with self.assertRaisesRegex(ReleaseError, "third-party notices"):
                     self.verify_with_inspections()
                 path.write_bytes(original)
+
+    def test_both_bundles_require_exact_nonempty_source_icon_bytes(self):
+        changed = bytes([self.icon[0] ^ 1]) + self.icon[1:]
+        for bundle in (self.app, self.provider):
+            path = bundle / "Contents/Resources/MyDrive.icns"
+            for invalid in (None, b"", changed):
+                with self.subTest(bundle=bundle.name, invalid_size=None if invalid is None else len(invalid)):
+                    if invalid is None:
+                        path.unlink()
+                    else:
+                        path.write_bytes(invalid)
+                    with self.assertRaisesRegex(ReleaseError, "app icon"):
+                        self.verify_with_inspections()
+                    path.write_bytes(self.icon)
+
+    def test_both_bundles_require_the_exact_icon_plist_reference(self):
+        for bundle in (self.app, self.provider):
+            path = bundle / "Contents/Info.plist"
+            original = path.read_bytes()
+            for value in (None, "Other.icns", "../Resources/MyDrive.icns"):
+                with self.subTest(bundle=bundle.name, value=value):
+                    info = plistlib.loads(original)
+                    if value is None:
+                        del info["CFBundleIconFile"]
+                    else:
+                        info["CFBundleIconFile"] = value
+                    path.write_bytes(plistlib.dumps(info))
+                    with self.assertRaisesRegex(ReleaseError, "app icon metadata"):
+                        self.verify_with_inspections()
+                    path.write_bytes(original)
+
+    def test_source_and_bundled_icons_refuse_symlinks_special_files_and_oversize(self):
+        for path in (self.source_icon, self.app / "Contents/Resources/MyDrive.icns",
+                     self.provider / "Contents/Resources/MyDrive.icns"):
+            other = self.root / "owned-icon-copy"
+            other.write_bytes(self.icon)
+            for kind in ("symlink", "fifo", "oversize"):
+                with self.subTest(path=path.parent.parent.name, kind=kind):
+                    path.unlink()
+                    if kind == "symlink":
+                        path.symlink_to(other)
+                    elif kind == "fifo":
+                        os.mkfifo(path)
+                    else:
+                        with path.open("wb") as output:
+                            output.truncate(release.MAX_ICON_BYTES + 1)
+                    with self.assertRaisesRegex(ReleaseError, "app icon"):
+                        self.verify_with_inspections()
+                    path.unlink()
+                    path.write_bytes(self.icon)
 
     def test_wrong_host_or_provider_team_is_rejected(self):
         for bundle in (self.app, self.provider):

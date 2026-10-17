@@ -24,6 +24,8 @@ Local settings use this shape; replace the example paths and identity with the i
 
 The loader accepts only documented nonsecret settings and rejects unknown keys. `MYDRIVE_SPARKLE_KEY_FILE` optionally points to a mode-0600 private export; omitting it uses Keychain account `mydrive-release`. Instead of the notarization profile, supply `MYDRIVE_NOTARY_KEY_PATH`, `MYDRIVE_NOTARY_KEY_ID` and `MYDRIVE_NOTARY_ISSUER_ID`. Store paths and identifiers, never private key contents, passwords or tokens, in the local JSON file.
 
+The original app icon has an editable vector renderer at `tools/render-app-icon.swift`. After changing its geometry, run `xcrun swift tools/render-app-icon.swift .build/icons`, then copy the generated `MyDrive.svg` and `MyDrive.icns` into `MacApp/Resources/`. The normal build includes the checked-in Retina icon in both bundles before signing; it needs no external artwork or icon-generation service.
+
 ## Future fixes and releases
 
 The agent implements the fix, runs appropriate local checks, bumps the version/build, writes release notes and commits the intended source. For example:

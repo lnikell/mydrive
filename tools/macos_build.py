@@ -90,7 +90,8 @@ def prepare(app, build, sparkle, identity, root=ROOT, environment=None):
                                   check=True, capture_output=True).stdout
             validate_profile(plistlib.loads(data), config, bundle, certificate)
             profiles.append(path)
-    common = dict(CFBundleVersion=version["build"], CFBundleShortVersionString=version["version"], LSMinimumSystemVersion="15.0")
+    common = dict(CFBundleVersion=version["build"], CFBundleShortVersionString=version["version"],
+                  LSMinimumSystemVersion="15.0", CFBundleIconFile="MyDrive.icns")
     host = dict(common, CFBundleIdentifier=config["app_bundle_id"], CFBundleName="MyDrive", CFBundleExecutable="MyDrive",
                 CFBundlePackageType="APPL", NSPrincipalClass="NSApplication", NSHighResolutionCapable=True,
                 NSLocalNetworkUsageDescription="MyDrive connects to your NAS to show files in Finder and keep selected files offline.",

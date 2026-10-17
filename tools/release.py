@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import stat
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,24 @@ from third_party_notices import NoticesError, verify_bundle as verify_notices
 from release_support import (ROOT, SPARKLE, VERSION_RE, MANIFEST_SCHEMA, ReleaseError, artifact_records,
                              configuration_problems, digest, release_config, run,
                              release_compatibility, source_commit, validate_appcast, validate_manifest, version_info)
+
+ICON_NAME = "MyDrive.icns"
+MAX_ICON_BYTES = 4 * 1024 * 1024
+
+
+def icon_bytes(path):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_ICON_BYTES:
+                raise ValueError()
+            data = source.read(MAX_ICON_BYTES + 1)
+            if len(data) != info.st_size or not 0 < len(data) <= MAX_ICON_BYTES:
+                raise ValueError()
+        return data
+    except (OSError, ValueError):
+        raise ReleaseError("The app icon must be a nonempty, bounded regular file without symlinks.") from None
 
 
 def signing_arguments():
@@ -85,6 +104,7 @@ def notarize(app, folder, config):
 
 
 def verify_app(app, config):
+    expected_icon = icon_bytes(ROOT / "MacApp/Resources" / ICON_NAME)
     try:
         version = plistlib.loads((app / "Contents/Info.plist").read_bytes())["CFBundleShortVersionString"]
         if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
@@ -95,6 +115,14 @@ def verify_app(app, config):
     run(["codesign", "--verify", "--deep", "--strict", app])
     for bundle, identifier in ((app, config["app_bundle_id"]),
                                (app / "Contents/PlugIns/MyDriveProvider.appex", config["provider_bundle_id"])):
+        try:
+            info = plistlib.loads((bundle / "Contents/Info.plist").read_bytes())
+        except (OSError, plistlib.InvalidFileException):
+            raise ReleaseError("The app and provider must retain their app icon metadata.") from None
+        if not isinstance(info, dict) or info.get("CFBundleIconFile") != ICON_NAME:
+            raise ReleaseError("The app and provider must retain their app icon metadata.")
+        if icon_bytes(bundle / "Contents/Resources" / ICON_NAME) != expected_icon:
+            raise ReleaseError("The app and provider must retain the exact source app icon.")
         signing = subprocess.run(["codesign", "--display", "--verbose=4", str(bundle)],
                                  capture_output=True, text=True, timeout=30)
         if signing.returncode or f"TeamIdentifier={config['team_id']}" not in signing.stderr.splitlines():

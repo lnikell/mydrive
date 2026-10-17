@@ -43,6 +43,8 @@ fi
 # Retain complete upstream licenses before either bundle is signed. The app's
 # MIT license does not relicense Cargo dependencies or the Sparkle framework.
 python3 "$TASK_ROOT/tools/third_party_notices.py" --app "$TASK_APP" --sparkle "$TASK_SPARKLE"
+cp "$TASK_ROOT/MacApp/Resources/MyDrive.icns" "$TASK_APP/Contents/Resources/MyDrive.icns"
+cp "$TASK_ROOT/MacApp/Resources/MyDrive.icns" "$TASK_EXTENSION/Contents/Resources/MyDrive.icns"
 xcrun swiftc -sdk "$TASK_SDK" -target "$TASK_ARCH-apple-macosx15.0" -swift-version 6 -O \
   -parse-as-library -whole-module-optimization -emit-library -static -emit-module \
   -module-name MyDriveCore -I "$TASK_ROOT/Core/Sources/CSQLite" \
