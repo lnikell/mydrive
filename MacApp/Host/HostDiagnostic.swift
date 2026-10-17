@@ -148,7 +148,7 @@ struct HostDiagnosticRequest {
                 try report.stage("removing_domain")
                 let result = try await management.remove()
                 try report.completeControl(message: "File Provider confirmed test-domain removal.",
-                    preservedURL: result.preservedURL, cleanupFailures: result.cleanupFailures)
+                    preservedURL: result.preservedURL, cleanupFailures: result.cleanupFailures, recoveryURLs: result.recoveryURLs)
             case .credential:
                 try report.stage("reading_credential")
                 _ = try CredentialStore.password(for: settings, allowInteraction: false)

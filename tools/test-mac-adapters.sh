@@ -64,6 +64,13 @@ run_test "$TASK_BUILD/connection-monitor-tests"
   -lsqlite3 -o "$TASK_BUILD/connection-store-tests"
 run_test "$TASK_BUILD/connection-store-tests"
 
+"${TASK_SWIFT[@]}" -module-name ConnectionRemovalStorageTests \
+  -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
+  "$TASK_ROOT/MacApp/Shared/DomainOwnerLease.swift" "$TASK_ROOT/MacApp/Shared/ConnectionRemovalStorage.swift" \
+  "$TASK_ROOT/MacApp/Tests/ConnectionRemovalStorageTests.swift" "$TASK_BUILD/libMyDriveCore.a" \
+  -lsqlite3 -o "$TASK_BUILD/connection-removal-storage-tests"
+run_test "$TASK_BUILD/connection-removal-storage-tests"
+
 for TASK_MODE in production development; do
   TASK_MODEL_SWIFT=("${TASK_SWIFT[@]}")
   if [[ "$TASK_MODE" == development ]]; then TASK_MODEL_SWIFT+=(-D MYDRIVE_DEVELOPMENT); fi

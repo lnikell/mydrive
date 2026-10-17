@@ -102,6 +102,7 @@ import Observation
         drives.removeAll { $0 === drive }
         var message = "Disconnected \(drive.name). NAS originals are retained."
         if let preserved = result.preservedURL { message += "\nLocal work retained at: \(preserved.path)" }
+        for recovery in result.recoveryURLs { message += "\nUpload recovery data retained at: \(recovery.path)" }
         if !result.cleanupFailures.isEmpty { message += "\nCleanup needs attention:\n" + result.cleanupFailures.joined(separator: "\n") }
         status = message
         return true

@@ -25,6 +25,7 @@ final class ProbeReport: @unchecked Sendable {
         var credential_read: String?
         var finderRoot: String?
         var preservedURL: String?
+        var recoveryURLs: [String]?
         var cleanupFailures: [String]?
         var cleanupFailureCount: Int?
         var failedStage: String?
@@ -68,11 +69,12 @@ final class ProbeReport: @unchecked Sendable {
         }
     }
 
-    func completeControl(message: String, preservedURL: URL? = nil, cleanupFailures: [String] = []) throws {
+    func completeControl(message: String, preservedURL: URL? = nil, cleanupFailures: [String] = [], recoveryURLs: [URL] = []) throws {
         try lock.withLock {
             guard !finished else { return }
             snapshot.message = String(message.prefix(512))
             snapshot.preservedURL = preservedURL?.absoluteString
+            snapshot.recoveryURLs = Array(recoveryURLs.prefix(8)).map { String($0.absoluteString.prefix(1024)) }
             snapshot.cleanupFailures = Array(cleanupFailures.prefix(8)).map { String($0.prefix(256)) }
             snapshot.cleanupFailureCount = cleanupFailures.count
             advance("complete")

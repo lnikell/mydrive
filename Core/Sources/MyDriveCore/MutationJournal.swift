@@ -1,6 +1,12 @@
 import Foundation
 
 extension Catalog {
+    /// Cleanup must retain failed and unknown states too. Replay scheduling's
+    /// narrower set is not evidence that local recovery data is disposable.
+    public func hasUnfinishedMutations() throws -> Bool {
+        try database.scalarInt("SELECT EXISTS(SELECT 1 FROM operations WHERE state != 'completed')") != 0
+    }
+
     /// A repeated identical intent returns the existing operation. Reusing its
     /// idempotency key for different work fails instead of creating ambiguity.
     public func enqueue(_ intent: JournalIntent) throws -> JournalOperation {

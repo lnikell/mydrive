@@ -5,6 +5,7 @@ import Foundation
 struct ConnectionRemoval {
     let preservedURL: URL?
     let cleanupFailures: [String]
+    var recoveryURLs: [URL] = []
 }
 
 @MainActor final class DomainManagement {
@@ -161,21 +162,20 @@ struct ConnectionRemoval {
         // the URL of pending local work that macOS chose to preserve.
         do { try CredentialStore.remove(for: settings) }
         catch { failures.append("Saved credentials: \(error.localizedDescription)") }
+        var recovery: [URL] = []
         do {
-            let folder = try AppStorage.folder(for: settings.domainID, create: false)
-            let folderPath = folder.resolvingSymlinksInPath().standardizedFileURL.path
-            if let preserved {
-                let path = preserved.resolvingSymlinksInPath().standardizedFileURL.path
-                guard path != folderPath, !path.hasPrefix(folderPath + "/") else {
-                    return ConnectionRemoval(preservedURL: preserved,
-                        cleanupFailures: failures + ["Settings retained beside preserved local work."])
+            let store = try AppStorage.connectionStore()
+            let folder = try store.folder(for: settings.domainID)
+            do {
+                if let retained = try await ConnectionRemovalStorage.clean(folder: folder, preserving: preserved) {
+                    recovery.append(retained)
                 }
+            } catch {
+                recovery.append(folder)
+                throw error
             }
-            do { try FileManager.default.removeItem(at: folder) }
-            catch let error as NSError where error.domain == NSCocoaErrorDomain
-                && error.code == CocoaError.fileNoSuchFile.rawValue { /* Already absent. */ }
-        } catch { failures.append("Connection settings: \(error.localizedDescription)") }
-        return ConnectionRemoval(preservedURL: preserved, cleanupFailures: failures)
+        } catch { failures.append("Local recovery data retained: \(error.localizedDescription)") }
+        return ConnectionRemoval(preservedURL: preserved, cleanupFailures: failures, recoveryURLs: recovery)
     }
 
     private func control<Value: Sendable>(

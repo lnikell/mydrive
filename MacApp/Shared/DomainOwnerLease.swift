@@ -1,16 +1,22 @@
 import Foundation
 import Darwin
 
-/// A process-local actor does not exclude a replacement extension process.
+/// A process-local actor does not exclude a replacement extension process or
+/// host cleanup after File Provider removes a domain.
 /// The kernel releases this advisory lock if its owner crashes.
 final class DomainOwnerLease: @unchecked Sendable {
     private let lock = NSLock()
     private var descriptor: Int32
 
     init(at url: URL) throws {
-        let opened = Darwin.open(url.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0o600)
+        let opened = Darwin.open(url.path, O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK, 0o600)
         guard opened >= 0 else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSUnderlyingErrorKey: Self.posixError()])
+        }
+        var info = stat()
+        guard fstat(opened, &info) == 0, info.st_mode & S_IFMT == S_IFREG else {
+            Darwin.close(opened)
+            throw CocoaError(.fileReadNoPermission)
         }
         guard flock(opened, LOCK_EX | LOCK_NB) == 0 else {
             let underlying = Self.posixError()
