@@ -50,6 +50,11 @@ run_test "$TASK_BUILD/helper-operation-tests"
   -framework FileProvider -o "$TASK_BUILD/connection-monitor-tests"
 run_test "$TASK_BUILD/connection-monitor-tests"
 
+"${TASK_SWIFT[@]}" -module-name SMBAddressTests \
+  "$TASK_ROOT/MacApp/Shared/SMBAddress.swift" "$TASK_ROOT/MacApp/Tests/SMBAddressTests.swift" \
+  -o "$TASK_BUILD/smb-address-tests"
+run_test "$TASK_BUILD/smb-address-tests"
+
 # Build the current Core sources into this test directory so a simultaneous
 # app build cannot substitute a stale module or mutate our linked archive.
 "${TASK_SWIFT[@]}" -whole-module-optimization -emit-library -static -emit-module \

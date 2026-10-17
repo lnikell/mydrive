@@ -300,6 +300,10 @@ struct SMBClient: Sendable {
                      onPage: (@Sendable ([RemoteEntry]) async throws -> Void)? = nil,
                      progress: (@Sendable (Int64) -> Void)? = nil) async throws -> TransportEvent.Completion? {
         try Task.checkCancellation()
+        #if MYDRIVE_DEVELOPMENT
+        if AppStorage.isDevelopmentStorage { try DevelopmentConnectionScope.validate(settings) }
+        #endif
+        let address = try SMBAddress(server: settings.host, share: settings.share)
         let receiver = TransportReceiver(command: operation.command, uploadLimit: operation.uploadLimit, onPage: onPage, progress: progress)
         #if MYDRIVE_DEVELOPMENT
         let password = try passwordOverride ?? developmentPasswordOverride ?? CredentialStore.password(for: settings)
@@ -308,7 +312,7 @@ struct SMBClient: Sendable {
         let password = try passwordOverride ?? CredentialStore.password(for: settings)
         let helperURL = try AppStorage.transportURL()
         #endif
-        let input = try TransportRequest(host: settings.host, share: settings.share,
+        let input = try TransportRequest(host: address.endpoint, share: address.share,
                                          username: settings.username, password: password,
                                          operation: operation).encoded()
         try await HelperOperation.run(

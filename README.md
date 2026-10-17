@@ -4,7 +4,7 @@ Native macOS NAS client in development, using Swift and File Provider for Finder
 
 ## Current implementation
 
-- A compact native drive list with Add/Reconnect sheets and per-drive Finder, refresh, offload and removal actions.
+- A compact native drive list with Add/Reconnect sheets and per-drive Finder, refresh, offload and removal actions. Add a bare server name or paste an SMB URL containing the share.
 - An Uninstall MyDrive action that disconnects all drives, removes clean downloads and identifies preserved local work before showing the app in Finder.
 - Multiple saved SMB Connections, each with its own stable Finder Domain, Catalog, credentials and refresh monitor.
 - Sparkle 2.10 native update checks and automatic download/install preferences, with local scripts publishing signed and notarized updates to GitHub Releases. Public distribution still needs Apple signing configuration.

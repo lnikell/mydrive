@@ -17,7 +17,7 @@ import SwiftUI
             Form {
                 if isAdding {
                     TextField("Name (optional)", text: $settings.displayName, prompt: Text("Uses the share name"))
-                    TextField("Server", text: $settings.host, prompt: Text("nas.local or 192.168.1.10"))
+                    TextField("Server", text: $settings.host, prompt: Text("nas.local or smb://nas.local/Shared"))
                         .autocorrectionDisabled()
                     TextField("Share", text: $settings.share, prompt: Text("Shared folder name"))
                         .autocorrectionDisabled()
@@ -68,7 +68,7 @@ import SwiftUI
     }
 
     private var canSubmit: Bool {
-        !submitting && !password.isEmpty && [settings.host, settings.share, settings.username]
+        !submitting && !model.busy && !password.isEmpty && [settings.host, settings.username]
             .allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
@@ -78,14 +78,24 @@ import SwiftUI
 
     private func submit() {
         guard canSubmit else { return }
-        submitting = true
         failure = ""
         let secret = password
         var candidate = settings
+        do {
+            if isAdding {
+                let address = try SMBAddress(server: candidate.host, share: candidate.share)
+                candidate.host = address.endpoint
+                candidate.share = address.share
+            }
+        } catch {
+            failure = error.localizedDescription
+            return
+        }
         if candidate.displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             candidate.displayName = candidate.share
         }
         settings = candidate
+        submitting = true
         submission = Task {
             let success: Bool
             if let drive { success = await model.reconnect(drive, password: secret) }

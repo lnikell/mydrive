@@ -43,7 +43,7 @@ private final class ByteSamples: @unchecked Sendable {
         try check(Data(composed.utf8) != Data(decomposed.utf8), "Unicode fixtures have identical wire bytes")
         let secret = "synthetic-\u{e9}\nsecond line\r\n"
         let settings = ConnectionSettings(domainID: "synthetic", displayName: "Synthetic only",
-            host: "--synthetic.invalid", share: "Partag\u{e9}-" + decomposed,
+            host: "synthetic.invalid", share: "Partag\u{e9}-" + decomposed.replacingOccurrences(of: "/", with: "-"),
             username: "Utilis\u{e9}-" + decomposed)
         let client = SMBClient(settings: settings, developmentPassword: secret, helperURL: helper)
 
@@ -54,7 +54,7 @@ private final class ByteSamples: @unchecked Sendable {
             try check(names.count == 1, "The local helper did not observe one complete request")
             let wire = try unhex(names[0])
             let request = try JSONSerialization.jsonObject(with: wire) as! [String: Any]
-            for (key, expected) in [("host", settings.host), ("share", settings.share),
+            for (key, expected) in [("host", settings.host + ":445"), ("share", settings.share),
                                     ("username", settings.username), ("password", secret)] {
                 let actual = request[key] as? String
                 try check(actual.map { Data($0.utf8) } == Data(expected.utf8), "A request string changed UTF-8 bytes")
@@ -63,7 +63,48 @@ private final class ByteSamples: @unchecked Sendable {
             try check(operation["type"] == "list" && operation["path"].map { Data($0.utf8) } == Data(path.utf8),
                       "A remote path changed UTF-8 bytes or became an option")
         }
-        print("PASS real subprocess preserves NFC/NFD names, endpoint strings, option-like paths and newline secrets")
+        try check(settings.host == "synthetic.invalid", "Wire normalization changed a saved credential endpoint")
+        print("PASS real subprocess preserves NFC/NFD names, share/user/secret bytes, normalizes a legacy bare endpoint and leaves saved settings unchanged")
+
+        for (server, endpoint) in [("smb://192.0.2.10/Shared%20folder/", "192.0.2.10:445"),
+                                   ("smb://_NAS_BOX_/Shared%20folder/", "_nas_box_:445")] {
+            let urlSettings = ConnectionSettings(domainID: "synthetic-url", displayName: "Synthetic URL",
+                host: server, share: "", username: "synthetic")
+            let urlPages = RequestPages()
+            try await SMBClient(settings: urlSettings, developmentPassword: secret, helperURL: helper)
+                .list(path: "") { await urlPages.append($0) }
+            let urlNames = await urlPages.names
+            let urlWire = try JSONSerialization.jsonObject(with: unhex(urlNames[0])) as! [String: Any]
+            try check(urlWire["host"] as? String == endpoint && urlWire["share"] as? String == "Shared folder" &&
+                      urlSettings.host == server && urlSettings.share.isEmpty,
+                      "URL trailing-slash/SMB hostname normalization changed saved settings or wire target")
+        }
+        let scoped = try DevelopmentConnectionScope.settings(domainID: UUID().uuidString.lowercased())
+        var alias = scoped; alias.host = "smb://" + scoped.host + "/" + scoped.share + "/"
+        try check(try SMBAddress(server: alias.host, share: alias.share).endpoint == scoped.host,
+                  "Authorization test did not use a semantically equivalent address")
+        var rawScopeRejected = false
+        do { try DevelopmentConnectionScope.validate(alias) } catch { rawScopeRejected = true }
+        try check(rawScopeRejected, "Address normalization broadened the exact development authorization")
+        let newDraftAddress = try SMBAddress(server: alias.host, share: "")
+        var newDraft = alias; newDraft.host = newDraftAddress.endpoint; newDraft.share = newDraftAddress.share
+        try DevelopmentConnectionScope.validate(newDraft)
+        let bareDraftAddress = try SMBAddress(server: String(scoped.host.dropLast(4)), share: scoped.share)
+        newDraft.host = bareDraftAddress.endpoint; newDraft.share = bareDraftAddress.share
+        try DevelopmentConnectionScope.validate(newDraft)
+        for field in ["host", "share", "username", "port"] {
+            var different = newDraft
+            switch field {
+            case "host": different.host = "192.0.2.2:445"
+            case "share": different.share = "Other"
+            case "username": different.username = "Other"
+            default: different.host = "192.0.2.1:1445"
+            }
+            var refused = false
+            do { try DevelopmentConnectionScope.validate(different) } catch { refused = true }
+            try check(refused, "Canonical new-draft scope accepted a different endpoint/account")
+        }
+        print("PASS URL/default-port drafts validate their canonical authorized target; raw bound aliases and different endpoint/accounts remain refused")
 
         try await client.probe()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mydrive-transport-request-" + UUID().uuidString)
