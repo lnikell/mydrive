@@ -165,6 +165,10 @@ struct ConnectionRemoval {
         var recovery: [URL] = []
         do {
             let store = try AppStorage.connectionStore()
+            if let preserved {
+                do { try store.retainedWorkLocations.record(preserved, domainID: settings.domainID) }
+                catch { failures.append("Retained-work shortcut could not be saved: \(error.localizedDescription)") }
+            }
             let folder = try store.folder(for: settings.domainID)
             do {
                 if let retained = try await ConnectionRemovalStorage.clean(folder: folder, preserving: preserved) {

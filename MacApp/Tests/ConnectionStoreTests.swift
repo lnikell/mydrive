@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import MyDriveCore
 
@@ -57,6 +58,10 @@ private func rejects(_ operation: () throws -> Void) throws {
         try require(try store.load().issues.count == 1, "Symlink record was accepted")
         try rejects { try store.save(a) }
         try FileManager.default.removeItem(at: recordA)
+        try require(mkfifo(recordA.path, 0o600) == 0, "Could not construct malformed FIFO settings fixture")
+        try rejects { _ = try store.settings(for: a.id) }
+        try require(try store.load().issues.count == 1, "FIFO settings were accepted or hid independent valid drives")
+        try FileManager.default.removeItem(at: recordA)
         try store.save(a)
         print("PASS bounded corrupt/mismatched/symlink records are isolated and cannot be overwritten")
 
@@ -74,9 +79,40 @@ private func rejects(_ operation: () throws -> Void) throws {
         let bBytes = try Data(contentsOf: store.folder(for: b.id).appendingPathComponent("connection.json"))
         try require(try store.removeUnregisteredSettings(a) == store.folder(for: a.id), "Unknown local work was not retained")
         try require(FileManager.default.fileExists(atPath: retained.path), "Pending work was deleted")
+        let reloadedRecovery = try store.load().retainedFolders.map { $0.resolvingSymlinksInPath().path }
+        try require(reloadedRecovery == [store.folder(for: a.id).resolvingSymlinksInPath().path], "Detached recovery work disappeared after restart")
         try require(try Data(contentsOf: store.folder(for: b.id).appendingPathComponent("connection.json")) == bBytes, "Removing A changed B")
         try require(try store.removeUnregisteredSettings(settings("unas-test")) == nil, "Empty legacy settings folder was not removed")
         try require(!FileManager.default.fileExists(atPath: store.folder(for: "unas-test").path), "Removed empty folder remains")
         print("PASS confirmed-unregistered cleanup removes only its record and empty directory")
+
+        let exported = temporary.appendingPathComponent("OS preserved work", isDirectory: true)
+        try FileManager.default.createDirectory(at: exported, withIntermediateDirectories: true)
+        try store.retainedWorkLocations.record(exported, domainID: a.id)
+        try store.retainedWorkLocations.record(exported, domainID: a.id)
+        let afterExportRestart = try ConnectionStore(root: root).load()
+        try require(afterExportRestart.retainedFolders.filter { $0 == exported }.count == 1,
+                    "An external OS export shortcut disappeared or duplicated after restart")
+        let receipts = root.appendingPathComponent("RetainedWork", isDirectory: true)
+        let corruptReceipt = receipts.appendingPathComponent(b.id + ".json")
+        try FileManager.default.createSymbolicLink(at: corruptReceipt, withDestinationURL: retained)
+        try require(try store.load().issues.contains { $0.id == "retained-" + b.id + ".json" },
+                    "A malformed recovery receipt was silently accepted")
+        try rejects { try store.retainedWorkLocations.record(URL(string: "file://remote.invalid/export")!, domainID: a.id) }
+        print("PASS durable OS-export shortcuts survive restart, deduplicate and refuse malformed receipts")
+
+        let detachedID = "ce1b3029-4524-464c-a6de-e34eea86974d"
+        let detached = try store.folder(for: detachedID, create: true)
+        let unreadable = detached.appendingPathComponent("Mutations", isDirectory: true)
+        try FileManager.default.createDirectory(at: unreadable, withIntermediateDirectories: true)
+        try Data("unuploaded bytes".utf8).write(to: unreadable.appendingPathComponent("payload"))
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: unreadable.path)
+        let unreadableLoad = try store.load()
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unreadable.path)
+        try require(unreadableLoad.issues.contains { $0.id == detachedID },
+                    "An unreadable staging directory was mistaken for empty")
+        try require(try store.load().retainedFolders.contains { $0.lastPathComponent == detachedID },
+                    "Readable staged work was not rediscovered")
+        print("PASS directory-enumeration errors remain visible and never classify staged work as empty")
     }
 }

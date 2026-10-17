@@ -9,6 +9,7 @@ struct ConnectionLoadIssue: Identifiable, Sendable {
 struct SavedConnections: Sendable {
     let connections: [ConnectionSettings]
     let issues: [ConnectionLoadIssue]
+    var retainedFolders: [URL] = []
 }
 
 enum ConnectionStoreError: LocalizedError {
@@ -42,11 +43,16 @@ struct ConnectionStore: Sendable {
 
     func settings(for id: String) throws -> ConnectionSettings {
         let url = try folder(for: id).appendingPathComponent("connection.json")
-        guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else {
-            throw CocoaError(.fileReadNoPermission)
+        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            if errno == ENOENT { throw CocoaError(.fileReadNoSuchFile) }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
-        let input = try FileHandle(forReadingFrom: url)
+        let input = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? input.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+              info.st_size >= 0, info.st_size <= Self.maximumRecordBytes else { throw CocoaError(.fileReadCorruptFile) }
         var bytes = Data()
         while let chunk = try input.read(upToCount: Self.maximumRecordBytes + 1 - bytes.count), !chunk.isEmpty {
             bytes.append(chunk)
@@ -73,18 +79,49 @@ struct ConnectionStore: Sendable {
         }
         var connections: [ConnectionSettings] = []
         var issues: [ConnectionLoadIssue] = []
+        var retained: [URL] = []
         for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) {
             let id = url.lastPathComponent
             guard ConnectionSettings.validDomainID(id) else { continue }
             do {
                 guard try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { continue }
                 if let settings = try existingSettings(for: id) { connections.append(settings) }
+                else if try containsDetachedData(in: url) { retained.append(url) }
             } catch {
                 issues.append(ConnectionLoadIssue(id: id, message: "Saved drive \(id): " + String(error.localizedDescription.prefix(512))))
             }
         }
         connections.sort { $0.domainID < $1.domainID }
-        return SavedConnections(connections: connections, issues: issues)
+        do {
+            let exported = try retainedWorkLocations.load()
+            for url in exported.urls where !retained.contains(url) { retained.append(url) }
+            issues.append(contentsOf: exported.issues)
+        } catch {
+            issues.append(ConnectionLoadIssue(id: "retained-work", message:
+                "Retained-work locations could not be read: " + String(error.localizedDescription.prefix(512))))
+        }
+        return SavedConnections(connections: connections, issues: issues, retainedFolders: retained.sorted { $0.path < $1.path })
+    }
+
+    var retainedWorkLocations: RetainedWorkLocations {
+        RetainedWorkLocations(root: root.appendingPathComponent("RetainedWork", isDirectory: true))
+    }
+
+    /// Only inspect names, never payloads or plans. A missing connection record
+    /// must not make retained upload recovery work disappear after app restart.
+    private func containsDetachedData(in folder: URL) throws -> Bool {
+        try DirectoryContents.contains(in: folder) { name in
+            if name == "catalog.sqlite.owner" { return false }
+            let entry = folder.appendingPathComponent(name)
+            var info = stat()
+            guard lstat(entry.path, &info) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            if name == "Mutations", info.st_mode & S_IFMT == S_IFDIR {
+                return try DirectoryContents.contains(in: entry) { _ in true }
+            }
+            return true
+        }
     }
 
     func save(_ settings: ConnectionSettings) throws {

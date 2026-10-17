@@ -59,14 +59,15 @@ run_test "$TASK_BUILD/connection-monitor-tests"
 
 "${TASK_SWIFT[@]}" -module-name ConnectionStoreTests \
   -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
-  "$TASK_ROOT/MacApp/Shared/AppStorage.swift" "$TASK_ROOT/MacApp/Shared/ConnectionStore.swift" \
+  "$TASK_ROOT/MacApp/Shared/AppStorage.swift" "$TASK_ROOT/MacApp/Shared/DirectoryContents.swift" \
+  "$TASK_ROOT/MacApp/Shared/RetainedWorkLocations.swift" "$TASK_ROOT/MacApp/Shared/ConnectionStore.swift" \
   "$TASK_ROOT/MacApp/Tests/ConnectionStoreTests.swift" "$TASK_BUILD/libMyDriveCore.a" \
   -lsqlite3 -o "$TASK_BUILD/connection-store-tests"
 run_test "$TASK_BUILD/connection-store-tests"
 
 "${TASK_SWIFT[@]}" -module-name ConnectionRemovalStorageTests \
   -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
-  "$TASK_ROOT/MacApp/Shared/DomainOwnerLease.swift" "$TASK_ROOT/MacApp/Shared/ConnectionRemovalStorage.swift" \
+  "$TASK_ROOT/MacApp/Shared/DomainOwnerLease.swift" "$TASK_ROOT/MacApp/Shared/DirectoryContents.swift" "$TASK_ROOT/MacApp/Shared/ConnectionRemovalStorage.swift" \
   "$TASK_ROOT/MacApp/Tests/ConnectionRemovalStorageTests.swift" "$TASK_BUILD/libMyDriveCore.a" \
   -lsqlite3 -o "$TASK_BUILD/connection-removal-storage-tests"
 run_test "$TASK_BUILD/connection-removal-storage-tests"

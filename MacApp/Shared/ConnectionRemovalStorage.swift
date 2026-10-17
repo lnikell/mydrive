@@ -47,41 +47,19 @@ enum ConnectionRemovalStorage {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }
         guard info.st_mode & S_IFMT == S_IFDIR else { return true }
-        return try containsEntry(in: staging) { _ in true }
+        return try DirectoryContents.contains(in: staging) { _ in true }
     }
 
     private static func hasUnknownEntries(in folder: URL) throws -> Bool {
         let known: Set<String> = ["connection.json", "catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm",
                                   "catalog.sqlite.owner", "Mutations"]
-        return try containsEntry(in: folder) { name in
+        return try DirectoryContents.contains(in: folder) { name in
             guard known.contains(name) else { return true }
             var info = stat()
             guard lstat(folder.appendingPathComponent(name).path, &info) == 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
             return info.st_mode & S_IFMT != (name == "Mutations" ? S_IFDIR : S_IFREG)
-        }
-    }
-
-    private static func containsEntry(in folder: URL, matching predicate: (String) throws -> Bool) throws -> Bool {
-        let descriptor = open(folder.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard let directory = fdopendir(descriptor) else {
-            let code = errno
-            close(descriptor)
-            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
-        }
-        defer { closedir(directory) }
-        while true {
-            errno = 0
-            guard let entry = readdir(directory) else {
-                if errno != 0 { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-                return false
-            }
-            let name = withUnsafePointer(to: &entry.pointee.d_name) {
-                $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) { String(cString: $0) }
-            }
-            if name != "." && name != "..", try predicate(name) { return true }
         }
     }
 
