@@ -4,17 +4,16 @@ extension SQLiteConnection {
     func migrate() throws {
         try transaction {
             let version = try scalarInt("PRAGMA user_version")
-            guard (0...2).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
-            guard version != 2 else { return }
+            guard (0...4).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
+            guard version != 4 else { return }
             if version == 1 {
                 try script("""
                     CREATE TABLE IF NOT EXISTS observed_directories (item_id TEXT PRIMARY KEY REFERENCES items(id));
                     CREATE INDEX IF NOT EXISTS live_items ON items(is_deleted, id);
                     PRAGMA user_version = 2;
                     """)
-                return
-            }
-            try script("""
+            } else if version == 0 {
+              try script("""
                 CREATE TABLE catalog_state (
                     singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
                     generation INTEGER NOT NULL,
@@ -72,6 +71,13 @@ extension SQLiteConnection {
                 CREATE INDEX replay ON operations(state, sequence);
                 PRAGMA user_version = 2;
                 """)
+            }
+            if version < 3 { try migrateChangeFeed() }
+            // Version 3 was the first incremental feed. Keep its item-scoped
+            // lookup indexed when migrating an already-created feed database.
+            try execute("CREATE INDEX IF NOT EXISTS changes_item ON catalog_changes(item_id, sequence)")
+            try migrateWritableJournal()
+            try execute("PRAGMA user_version = 4")
         }
     }
 }

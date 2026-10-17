@@ -39,11 +39,14 @@ public actor Catalog {
     /// validates generation before continuing; ID ordering is independent of names.
     public func knownItems(afterID: String? = nil, limit: Int = 128) throws -> [CatalogItem] {
         try Self.validatePageSize(limit)
+        let continuation = afterID == nil ? "" : "AND id > ?"
+        var values = afterID.map { [SQLValue.text($0)] } ?? []
+        values.append(.integer(Int64(limit)))
         return try database.statement("""
             SELECT \(Self.itemColumns) FROM items
-            WHERE is_deleted = 0 AND id != 'root' AND (? IS NULL OR id > ?)
+            WHERE is_deleted = 0 AND id != 'root' \(continuation)
             ORDER BY id LIMIT ?
-            """, [SQLValue(afterID), SQLValue(afterID), .integer(Int64(limit))]) { statement in
+            """, values) { statement in
                 var items: [CatalogItem] = []
                 while try statement.step() { items.append(try Self.decodeItem(statement)) }
                 return items
@@ -104,8 +107,10 @@ public actor Catalog {
             var values: [SQLValue] = [.text(parentID)]
             var condition = ""
             if let cursor {
-                condition = "AND (name > ? OR (name = ? AND id > ?))"
-                values += [.text(cursor.lastName), .text(cursor.lastName), .text(cursor.lastID)]
+                // Row-value continuation lets SQLite seek directly into the
+                // children index instead of visiting every preceding page.
+                condition = "AND (name, id) > (?, ?)"
+                values += [.text(cursor.lastName), .text(cursor.lastID)]
             }
             values.append(.integer(Int64(limit + 1)))
             var items = try database.statement("""
@@ -180,12 +185,15 @@ public actor Catalog {
     /// the last returned ID; refresh this settings view when selections change.
     public func offlineSelections(afterID: String? = nil, limit: Int = 128) throws -> [CatalogItem] {
         try Self.validatePageSize(limit)
+        let continuation = afterID == nil ? "" : "AND id > ?"
+        var values = afterID.map { [SQLValue.text($0)] } ?? []
+        values.append(.integer(Int64(limit)))
         return try database.statement("""
             SELECT \(Self.itemColumns) FROM items
             WHERE is_deleted = 0 AND id IN (SELECT item_id FROM offline_policy WHERE policy = 'keepAvailable')
-                AND (? IS NULL OR id > ?)
+                \(continuation)
             ORDER BY id LIMIT ?
-            """, [SQLValue(afterID), SQLValue(afterID), .integer(Int64(limit))]) { statement in
+            """, values) { statement in
                 var items: [CatalogItem] = []
                 while try statement.step() { items.append(try Self.decodeItem(statement)) }
                 return items

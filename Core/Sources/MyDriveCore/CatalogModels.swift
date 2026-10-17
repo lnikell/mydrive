@@ -23,7 +23,7 @@ public enum ItemKind: String, Codable, Sendable {
 /// A listing observation. A remote key must be unique per directory entry across
 /// the share and stable across renames/reconnects. Omit it without that guarantee,
 /// including when a server reuses one object identifier for multiple hard links.
-public struct RemoteEntry: Equatable, Sendable {
+public struct RemoteEntry: Codable, Equatable, Sendable {
     public let name: String
     public let kind: ItemKind
     public let remoteKey: String?
@@ -47,11 +47,18 @@ public struct RemoteEntry: Equatable, Sendable {
     }
 }
 
-public struct CatalogItem: Equatable, Sendable {
+public struct CatalogItem: Codable, Equatable, Sendable {
     public let id: String
     public let parentID: String?
     public let entry: RemoteEntry
     public let isDeleted: Bool
+
+    public init(id: String, parentID: String?, entry: RemoteEntry, isDeleted: Bool = false) {
+        self.id = id
+        self.parentID = parentID
+        self.entry = entry
+        self.isDeleted = isDeleted
+    }
 }
 
 public enum OfflinePolicy: String, Sendable {
@@ -89,6 +96,8 @@ public struct CatalogSettings: Equatable, Sendable {
 }
 
 public enum JournalAction: Codable, Equatable, Sendable {
+    case create(parentID: String, name: String, kind: ItemKind)
+    case update(parentID: String, name: String)
     case rename(name: String)
     case move(parentID: String, name: String)
     case delete
@@ -100,16 +109,31 @@ public struct JournalIntent: Codable, Equatable, Sendable {
     public let idempotencyKey: UUID
     public let itemID: String
     public let expectedVersion: String?
+    public let expectedMetadataVersion: String?
     public let action: JournalAction
+    public let payload: StagedPayload?
+    public let createTemplateID: String?
+    public let sourcePath: String?
+    public let destinationPath: String?
+    public let baseEntry: RemoteEntry?
 
     public init(
         idempotencyKey: UUID = UUID(), itemID: String,
-        expectedVersion: String?, action: JournalAction
+        expectedVersion: String?, action: JournalAction,
+        expectedMetadataVersion: String? = nil, payload: StagedPayload? = nil,
+        createTemplateID: String? = nil, sourcePath: String? = nil,
+        destinationPath: String? = nil, baseEntry: RemoteEntry? = nil
     ) {
         self.idempotencyKey = idempotencyKey
         self.itemID = itemID
         self.expectedVersion = expectedVersion
+        self.expectedMetadataVersion = expectedMetadataVersion
         self.action = action
+        self.payload = payload
+        self.createTemplateID = createTemplateID
+        self.sourcePath = sourcePath
+        self.destinationPath = destinationPath
+        self.baseEntry = baseEntry
     }
 }
 
