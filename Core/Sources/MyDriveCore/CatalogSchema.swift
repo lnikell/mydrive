@@ -4,8 +4,8 @@ extension SQLiteConnection {
     func migrate() throws {
         try transaction {
             let version = try scalarInt("PRAGMA user_version")
-            guard (0...5).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
-            guard version != 5 else { return }
+            guard (0...6).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
+            guard version != 6 else { return }
             if version == 1 {
                 try script("""
                     CREATE TABLE IF NOT EXISTS observed_directories (item_id TEXT PRIMARY KEY REFERENCES items(id));
@@ -77,8 +77,9 @@ extension SQLiteConnection {
             // lookup indexed when migrating an already-created feed database.
             try execute("CREATE INDEX IF NOT EXISTS changes_item ON catalog_changes(item_id, sequence)")
             if version < 4 { try migrateWritableJournal() }
-            try migrateObjectIdentity()
-            try execute("PRAGMA user_version = 5")
+            if version < 5 { try migrateObjectIdentity() }
+            try migrateRecursiveDelete()
+            try execute("PRAGMA user_version = 6")
         }
     }
 }

@@ -61,13 +61,20 @@ extension Catalog {
                     guard let item = try item(id: $0.id), !item.isDeleted else { throw CatalogError.invalidParent }
                     return item
                 }, tombstones: tombstones.sorted(), generation: try generation())
-            let data = try JSONEncoder().encode(result)
-            guard data.count <= 8_388_608 else { throw CatalogError.invalidEntry }
-            try database.execute("""
-                UPDATE operations SET state = 'completed', commit_fingerprint = ?, result = ? WHERE idempotency_key = ?
-                """, [.text(fingerprint), .text(String(decoding: data, as: UTF8.self)), .text(key.uuidString)])
+            try storeMutationResult(result, key: key, fingerprint: fingerprint)
             return result
         }
+    }
+
+    /// Shared receipt publication. Caller owns the transaction and has verified
+    /// the exact intent/outcome; recursive progress never calls public commit
+    /// against a mutable path reconstructed from the live Catalog.
+    func storeMutationResult(_ result: MutationCommitResult, key: UUID, fingerprint: String) throws {
+        let data = try JSONEncoder().encode(result)
+        guard data.count <= 8_388_608 else { throw CatalogError.invalidEntry }
+        try database.execute("""
+            UPDATE operations SET state = 'completed', commit_fingerprint = ?, result = ? WHERE idempotency_key = ?
+            """, [.text(fingerprint), .text(String(decoding: data, as: UTF8.self)), .text(key.uuidString)])
     }
 
     private func validateCommit(
@@ -95,6 +102,8 @@ extension Catalog {
         switch intent.action {
         case .delete:
             guard retired.contains(intent.itemID) else { throw CatalogError.invalidEntry }
+        case .deleteTree:
+            throw CatalogError.invalidTransition // Only verified manifest progress can complete this root.
         default:
             guard proposed[intent.itemID] != nil else { throw CatalogError.invalidEntry }
         }
@@ -163,7 +172,7 @@ extension Catalog {
                   SQLValue(entry.objectIdentity.map { String($0.createdFiletime) })])
     }
 
-    private func invalidateMutationScans(upserts: [CatalogMutationItem], tombstones: [String]) throws {
+    func invalidateMutationScans(upserts: [CatalogMutationItem], tombstones: [String]) throws {
         var parents = Set(upserts.map(\.parentID))
         var directories = Set(upserts.filter { $0.entry.kind == .directory }.map(\.id))
         for id in upserts.map(\.id) + tombstones {
@@ -195,13 +204,13 @@ extension Catalog {
             """, directories.map(SQLValue.text))
     }
 
-    private func retireMutationSubtrees(_ ids: [String]) throws {
+    func retireMutationSubtrees(_ ids: [String]) throws {
         guard !ids.isEmpty else { return }
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
         try database.execute("""
             WITH RECURSIVE retired(id) AS (
                 SELECT id FROM items WHERE id IN (\(placeholders))
-                UNION SELECT items.id FROM items JOIN retired ON items.parent_id = retired.id
+                UNION SELECT items.id FROM items JOIN retired ON items.parent_id = retired.id WHERE items.is_deleted = 0
             )
             UPDATE items SET is_deleted = 1 WHERE id IN (SELECT id FROM retired) AND is_deleted = 0
             """, ids.map(SQLValue.text))

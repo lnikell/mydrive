@@ -2,6 +2,40 @@ import Testing
 @testable import MyDriveCore
 
 @Suite struct ObjectIdentityTests {
+    @Test func remoteAtomicFileSavePreservesLogicalIDPendingLocalBaseAndOfflineSelection() async throws {
+        let fixture = try Fixture()
+        let old = RemoteEntry(name: "document", kind: .file, contentVersion: "old-version", metadataVersion: "old-metadata",
+                              size: 42, objectIdentity: .init(indexNumber: 10, createdFiletime: 11))
+        try await publish([old], to: fixture.catalog)
+        let original = try #require(try await fixture.catalog.child(named: "document", in: Catalog.rootID))
+        try await fixture.catalog.setOfflinePolicy(.keepAvailable, for: original.id)
+        let local = JournalIntent(itemID: original.id, expectedVersion: old.contentVersion,
+            action: .update(parentID: Catalog.rootID, name: "document"), expectedMetadataVersion: old.metadataVersion,
+            payload: .init(id: mutationUUID(), size: 42, sha256: String(repeating: "a", count: 64)), baseEntry: old)
+        _ = try await fixture.catalog.enqueue(local)
+        let remoteSave = RemoteEntry(name: "document", kind: .file, contentVersion: "external-save", metadataVersion: "external-metadata",
+                                    size: 99, objectIdentity: .init(indexNumber: 20, createdFiletime: 21))
+        let anchor = try await fixture.catalog.currentChangeAnchor()
+        try await publish([remoteSave], to: fixture.catalog)
+        let current = try #require(try await fixture.catalog.child(named: "document", in: Catalog.rootID))
+        #expect(current.id == original.id)
+        #expect(current.entry.objectIdentity == remoteSave.objectIdentity)
+        #expect(current.entry.contentVersion == "external-save")
+        #expect(try await fixture.catalog.offlinePolicy(for: original.id) == .keepAvailable)
+        #expect(try await fixture.catalog.operation(key: local.idempotencyKey)?.intent.baseEntry == old)
+        #expect(try await fixture.catalog.changes(since: anchor).deletedIDs.isEmpty)
+        // The old ID remains publishable for a preserved local conflict copy.
+        try await fixture.catalog.transitionOperation(key: local.idempotencyKey, from: .queued, to: .executing)
+        let preservedLocal = RemoteEntry(name: "document conflict", kind: .file, contentVersion: "local", metadataVersion: "local",
+                                        size: 42, objectIdentity: .init(indexNumber: 30, createdFiletime: 31))
+        try await fixture.catalog.commitMutation(key: local.idempotencyKey, upserts: [
+            .init(id: original.id, parentID: Catalog.rootID, entry: preservedLocal),
+            .init(id: "preserved-external", parentID: Catalog.rootID, entry: remoteSave)
+        ], tombstones: [])
+        #expect(try await fixture.catalog.child(named: "document conflict", in: Catalog.rootID)?.id == original.id)
+        #expect(try await fixture.catalog.child(named: "document", in: Catalog.rootID)?.entry == remoteSave)
+    }
+
     @Test func unsignedIdentityPersistsThroughStagingRestartAndPublication() async throws {
         let fixture = try Fixture()
         let identity = RemoteObjectIdentity(indexNumber: .max, createdFiletime: .max)
@@ -14,7 +48,7 @@ import Testing
         let db = try SQLiteConnection(url: fixture.url, cacheKiB: 2_048)
         #expect(try db.scalarText("SELECT object_index_number FROM items WHERE id = ?", [.text(item.id)]) == "18446744073709551615")
         #expect(try db.scalarText("SELECT typeof(object_created_filetime) FROM items WHERE id = ?", [.text(item.id)]) == "text")
-        #expect(try db.scalarInt("PRAGMA user_version") == 5)
+        #expect(try db.scalarInt("PRAGMA user_version") == 6)
     }
 
     @Test func identityAdoptionPublishesOnceAndMissingLegacyMetadataCannotEraseIt() async throws {
@@ -131,18 +165,18 @@ import Testing
         let migrated = try Catalog(databaseURL: path)
         #expect(try await migrated.item(id: "old")?.entry.objectIdentity == nil)
         #expect(try db.scalarText("SELECT state FROM operations") == "uncertain")
-        #expect(try db.scalarInt("PRAGMA user_version") == 5)
+        #expect(try db.scalarInt("PRAGMA user_version") == 6)
         try await migrated.completeScan(.init(id: "pending-scan", parentID: Catalog.rootID))
         #expect(try await migrated.child(named: "file", in: Catalog.rootID)?.id == "old")
         #expect(try await migrated.generation() == 4)
         let reopened = try Catalog(databaseURL: path)
         #expect(try await reopened.item(id: "old")?.entry.objectIdentity == nil)
-        // First typed observation after migration must not adopt a replacement
-        // merely because the pathname and kind still match the legacy row.
+        // A regular file keeps its logical path identity after atomic saves,
+        // including the first typed observation of a migrated legacy row.
         try await publish([RemoteEntry(name: "file", kind: .file, contentVersion: "new opaque version",
             metadataVersion: "opaque", size: 42, objectIdentity: .init(indexNumber: 8, createdFiletime: 9))], to: reopened)
-        #expect(try await reopened.child(named: "file", in: Catalog.rootID)?.id != "old")
-        #expect(try await reopened.item(id: "old")?.isDeleted == true)
+        #expect(try await reopened.child(named: "file", in: Catalog.rootID)?.id == "old")
+        #expect(try await reopened.item(id: "old")?.isDeleted == false)
     }
 
     private func entry(_ name: String, kind: ItemKind = .file, identity: RemoteObjectIdentity? = nil) -> RemoteEntry {

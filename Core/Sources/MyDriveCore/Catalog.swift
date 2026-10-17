@@ -5,10 +5,12 @@ import Foundation
 public actor Catalog {
     public static let rootID = "root"
     let database: SQLiteConnection
+    public nonisolated let initialDomainVersionState: CatalogDomainVersionState?
 
-    public init(databaseURL: URL, cacheSizeKiB: Int = 2_048) throws {
+    public init(databaseURL: URL, cacheSizeKiB: Int = 2_048, initialDomainVersionArchive: Data? = nil) throws {
         database = try SQLiteConnection(url: databaseURL, cacheKiB: cacheSizeKiB)
         try database.migrate()
+        initialDomainVersionState = try database.bootstrapDomainVersion(initialDomainVersionArchive)
     }
 
     public func settings() throws -> CatalogSettings {

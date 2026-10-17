@@ -54,6 +54,7 @@ extension JournalIntent {
         case .rename(let name): fields.add("rename"); fields.add(name)
         case .move(let parentID, let name): fields.add("move"); fields.add(parentID); fields.add(name)
         case .delete: fields.add("delete")
+        case .deleteTree: fields.add("deleteTree")
         }
         fields.add(payload.map { String($0.size) })
         fields.add(payload?.sha256)
@@ -61,6 +62,7 @@ extension JournalIntent {
         fields.add(sourcePath)
         fields.add(destinationPath)
         fields.add(baseEntry)
+        if let deletionContextID { fields.add("deletionContext"); fields.add(deletionContextID) }
         return fields.digest
     }
 }

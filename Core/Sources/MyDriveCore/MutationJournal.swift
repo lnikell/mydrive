@@ -11,24 +11,28 @@ extension Catalog {
     /// idempotency key for different work fails instead of creating ambiguity.
     public func enqueue(_ intent: JournalIntent) throws -> JournalOperation {
         return try database.transaction {
-            if let existing = try operation(key: intent.idempotencyKey) {
-                guard existing.intent.requestFingerprint == intent.requestFingerprint else {
-                    throw CatalogError.idempotencyConflict
-                }
-                return existing
-            }
-            if let existing = try operation(requestFingerprint: intent.requestFingerprint) { return existing }
-            try validateIntent(intent)
-            let encoded = try JSONEncoder().encode(intent)
-            guard encoded.count <= 131_072 else { throw CatalogError.invalidEntry }
-            let json = String(decoding: encoded, as: UTF8.self)
-            try database.execute("""
-                INSERT INTO operations(idempotency_key, item_id, intent, state, request_fingerprint)
-                VALUES (?, ?, ?, 'queued', ?)
-                """, [.text(intent.idempotencyKey.uuidString), .text(intent.itemID), .text(json),
-                      .text(intent.requestFingerprint)])
-            return JournalOperation(intent: intent, state: .queued, attemptCount: 0)
+            try enqueueInTransaction(intent)
         }
+    }
+
+    func enqueueInTransaction(_ intent: JournalIntent) throws -> JournalOperation {
+        if let existing = try operation(key: intent.idempotencyKey) {
+            guard existing.intent.requestFingerprint == intent.requestFingerprint else {
+                throw CatalogError.idempotencyConflict
+            }
+            return existing
+    }
+    if let existing = try operation(requestFingerprint: intent.requestFingerprint) { return existing }
+    try validateIntent(intent)
+    let encoded = try JSONEncoder().encode(intent)
+    guard encoded.count <= 131_072 else { throw CatalogError.invalidEntry }
+    let json = String(decoding: encoded, as: UTF8.self)
+    try database.execute("""
+        INSERT INTO operations(idempotency_key, item_id, intent, state, request_fingerprint)
+        VALUES (?, ?, ?, 'queued', ?)
+        """, [.text(intent.idempotencyKey.uuidString), .text(intent.itemID), .text(json),
+              .text(intent.requestFingerprint)])
+    return JournalOperation(intent: intent, state: .queued, attemptCount: 0)
     }
 
     /// Compare-and-transition prevents an old callback from overwriting newer
@@ -112,8 +116,8 @@ extension Catalog {
         }
         if let base = intent.baseEntry {
             try Self.validateMutationEntry(base)
-            guard intent.expectedVersion == base.contentVersion,
-                  intent.expectedMetadataVersion == nil || intent.expectedMetadataVersion == base.metadataVersion else {
+            guard intent.expectedVersion.map({ Self.exact($0, base.contentVersion) }) == true,
+                  intent.expectedMetadataVersion.map({ Self.exact($0, base.metadataVersion) }) ?? true else {
                 throw CatalogError.invalidEntry
             }
         }
@@ -142,7 +146,7 @@ extension Catalog {
             try Self.validateName(name)
             try requireDirectory(parentID)
             guard intent.payload == nil else { throw CatalogError.invalidEntry }
-        case .delete:
+        case .delete, .deleteTree:
             guard intent.payload == nil else { throw CatalogError.invalidEntry }
         }
         guard intent.createTemplateID == nil else { throw CatalogError.invalidEntry }
@@ -150,6 +154,10 @@ extension Catalog {
             throw CatalogError.missingItem(intent.itemID)
         }
         if intent.payload != nil, item.entry.kind != .file { throw CatalogError.invalidEntry }
+        if case .deleteTree = intent.action {
+            guard item.entry.kind == .directory, intent.sourcePath != nil, intent.baseEntry != nil,
+                  intent.destinationPath == nil else { throw CatalogError.invalidEntry }
+        } else if intent.deletionContextID != nil { throw CatalogError.invalidEntry }
     }
 
     static func validateMutationID(_ id: String) throws {

@@ -44,73 +44,84 @@ extension Catalog {
 
     /// Call only after the transport confirms an exhaustive successful listing.
     /// Publication, disappearances and stable-identity updates commit atomically.
-    /// Without a stable remote key, identity is preserved only at the same path.
+    /// Without a stable remote key, logical file identity is preserved at the
+    /// same path, including atomic saves. Replaced directories get fresh IDs so
+    /// their former descendant graph and offline selections cannot be adopted.
     @discardableResult
     public func completeScan(_ scan: CatalogScan) throws -> Int64 {
         try database.transaction {
-            try requireScan(scan)
-            try requireDirectory(scan.parentID)
-            // Unknown legacy identity is enriched only while its exact opaque
-            // content version still agrees; a changed version starts a new ID.
-            try database.execute("""
-                UPDATE scan_entries SET item_id = COALESCE(
-                    CASE WHEN remote_key IS NOT NULL
-                        THEN (SELECT id FROM items WHERE items.remote_key = scan_entries.remote_key)
-                        ELSE (SELECT id FROM items WHERE parent_id = ? AND name = scan_entries.name
-                              AND kind = scan_entries.kind AND is_deleted = 0
-                              AND (scan_entries.object_index_number IS NULL OR items.object_index_number IS NOT NULL
-                                  OR items.content_version = scan_entries.content_version COLLATE BINARY)
-                              AND (items.object_index_number IS NULL OR scan_entries.object_index_number IS NULL
-                                  OR (items.object_index_number = scan_entries.object_index_number
-                                      AND items.object_created_filetime = scan_entries.object_created_filetime)))
-                    END,
-                    lower(hex(randomblob(16))))
-                WHERE scan_id = ?
-                """, [.text(scan.parentID), .text(scan.id)])
-            // Legacy observations may omit object identity. Once learned, keep
-            // it until a positively observed replacement receives a fresh ID.
-            try database.execute("""
-                UPDATE scan_entries SET
-                    object_index_number = (SELECT object_index_number FROM items WHERE id = scan_entries.item_id),
-                    object_created_filetime = (SELECT object_created_filetime FROM items WHERE id = scan_entries.item_id)
-                WHERE scan_id = ? AND object_index_number IS NULL
-                """, [.text(scan.id)])
-            try validateNoAncestorReuse(scan)
-            try database.execute("INSERT OR IGNORE INTO observed_directories(item_id) VALUES (?)", [.text(scan.parentID)])
-            if try !hasChanges(scan) {
-                try database.execute("DELETE FROM scans WHERE id = ?", [.text(scan.id)])
-                return try database.scalarInt("SELECT generation FROM catalog_state WHERE singleton = 1")
-            }
-            try database.execute("""
-                WITH RECURSIVE missing(id) AS (
-                    SELECT id FROM items WHERE parent_id = ? AND is_deleted = 0
-                        AND id NOT IN (SELECT item_id FROM scan_entries WHERE scan_id = ?)
-                    UNION
-                    SELECT items.id FROM items JOIN missing ON items.parent_id = missing.id
-                    WHERE items.is_deleted = 0
-                        AND items.id NOT IN (SELECT item_id FROM scan_entries WHERE scan_id = ?)
-                )
-                UPDATE items SET is_deleted = 1 WHERE id IN (SELECT id FROM missing)
-                """, [.text(scan.parentID), .text(scan.id), .text(scan.id)])
-            try database.execute("""
-                INSERT INTO items(
-                    id, parent_id, name, kind, remote_key, content_version, metadata_version, size, modified_at,
-                    is_deleted, object_index_number, object_created_filetime)
-                SELECT item_id, ?, name, kind, remote_key, content_version, metadata_version, size, modified_at,
-                    0, object_index_number, object_created_filetime
-                FROM scan_entries WHERE scan_id = ?
-                ON CONFLICT(id) DO UPDATE SET
-                    parent_id = excluded.parent_id, name = excluded.name, kind = excluded.kind,
-                    remote_key = excluded.remote_key, content_version = excluded.content_version,
-                    metadata_version = excluded.metadata_version, size = excluded.size,
-                    modified_at = excluded.modified_at, is_deleted = 0,
-                    object_index_number = excluded.object_index_number,
-                    object_created_filetime = excluded.object_created_filetime
-                """, [.text(scan.parentID), .text(scan.id)])
-            try database.execute("DELETE FROM scans WHERE id = ?", [.text(scan.id)])
-            try database.execute("UPDATE catalog_state SET generation = generation + 1 WHERE singleton = 1")
-            return try database.scalarInt("SELECT generation FROM catalog_state WHERE singleton = 1")
+            try completeScanInTransaction(scan)
         }
+    }
+
+    /// Shared by normal publication and qualified recursive inventory capture.
+    /// Caller owns the SQLite transaction; no network work occurs in this body.
+    func completeScanInTransaction(_ scan: CatalogScan) throws -> Int64 {
+        try requireScan(scan)
+        try requireDirectory(scan.parentID)
+        // Files retain the logical Finder ID after a remote atomic save so a
+        // pending local edit can reach conflict preservation. Directory identity
+        // enrichment requires an unchanged opaque version; changed/replaced
+        // directory objects must not adopt the old descendant graph.
+        try database.execute("""
+            UPDATE scan_entries SET item_id = COALESCE(
+                CASE WHEN remote_key IS NOT NULL
+                    THEN (SELECT id FROM items WHERE items.remote_key = scan_entries.remote_key)
+                    ELSE (SELECT id FROM items WHERE parent_id = ? AND name = scan_entries.name
+                          AND kind = scan_entries.kind AND is_deleted = 0
+                                  AND (scan_entries.kind = 'file' OR (
+                                      (scan_entries.object_index_number IS NULL OR items.object_index_number IS NOT NULL
+                                          OR items.content_version = scan_entries.content_version COLLATE BINARY)
+                                      AND (items.object_index_number IS NULL OR scan_entries.object_index_number IS NULL
+                                          OR (items.object_index_number = scan_entries.object_index_number
+                                              AND items.object_created_filetime = scan_entries.object_created_filetime)))))
+                END,
+                lower(hex(randomblob(16))))
+            WHERE scan_id = ?
+            """, [.text(scan.parentID), .text(scan.id)])
+        // Legacy observations may omit object identity. Once learned, keep
+        // it until a positively observed replacement receives a fresh ID.
+        try database.execute("""
+            UPDATE scan_entries SET
+                object_index_number = (SELECT object_index_number FROM items WHERE id = scan_entries.item_id),
+                object_created_filetime = (SELECT object_created_filetime FROM items WHERE id = scan_entries.item_id)
+            WHERE scan_id = ? AND object_index_number IS NULL
+            """, [.text(scan.id)])
+        try validateNoAncestorReuse(scan)
+        try database.execute("INSERT OR IGNORE INTO observed_directories(item_id) VALUES (?)", [.text(scan.parentID)])
+        if try !hasChanges(scan) {
+            try database.execute("DELETE FROM scans WHERE id = ?", [.text(scan.id)])
+            return try database.scalarInt("SELECT generation FROM catalog_state WHERE singleton = 1")
+    }
+    try database.execute("""
+        WITH RECURSIVE missing(id) AS (
+            SELECT id FROM items WHERE parent_id = ? AND is_deleted = 0
+                AND id NOT IN (SELECT item_id FROM scan_entries WHERE scan_id = ?)
+            UNION
+            SELECT items.id FROM items JOIN missing ON items.parent_id = missing.id
+            WHERE items.is_deleted = 0
+                AND items.id NOT IN (SELECT item_id FROM scan_entries WHERE scan_id = ?)
+        )
+        UPDATE items SET is_deleted = 1 WHERE id IN (SELECT id FROM missing)
+        """, [.text(scan.parentID), .text(scan.id), .text(scan.id)])
+    try database.execute("""
+        INSERT INTO items(
+            id, parent_id, name, kind, remote_key, content_version, metadata_version, size, modified_at,
+            is_deleted, object_index_number, object_created_filetime)
+        SELECT item_id, ?, name, kind, remote_key, content_version, metadata_version, size, modified_at,
+            0, object_index_number, object_created_filetime
+        FROM scan_entries WHERE scan_id = ?
+        ON CONFLICT(id) DO UPDATE SET
+            parent_id = excluded.parent_id, name = excluded.name, kind = excluded.kind,
+            remote_key = excluded.remote_key, content_version = excluded.content_version,
+            metadata_version = excluded.metadata_version, size = excluded.size,
+            modified_at = excluded.modified_at, is_deleted = 0,
+            object_index_number = excluded.object_index_number,
+            object_created_filetime = excluded.object_created_filetime
+        """, [.text(scan.parentID), .text(scan.id)])
+    try database.execute("DELETE FROM scans WHERE id = ?", [.text(scan.id)])
+    try database.execute("UPDATE catalog_state SET generation = generation + 1 WHERE singleton = 1")
+    return try database.scalarInt("SELECT generation FROM catalog_state WHERE singleton = 1")
     }
 
     public func abandonScan(_ scan: CatalogScan) throws {

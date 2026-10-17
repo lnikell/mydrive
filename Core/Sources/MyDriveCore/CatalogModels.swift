@@ -115,6 +115,7 @@ public enum JournalAction: Codable, Equatable, Sendable {
     case rename(name: String)
     case move(parentID: String, name: String)
     case delete
+    case deleteTree
 }
 
 /// Preparing an intent does not perform any remote mutation. Scheduling and
@@ -130,13 +131,14 @@ public struct JournalIntent: Codable, Equatable, Sendable {
     public let sourcePath: String?
     public let destinationPath: String?
     public let baseEntry: RemoteEntry?
+    public let deletionContextID: String?
 
     public init(
         idempotencyKey: UUID = UUID(), itemID: String,
         expectedVersion: String?, action: JournalAction,
         expectedMetadataVersion: String? = nil, payload: StagedPayload? = nil,
         createTemplateID: String? = nil, sourcePath: String? = nil,
-        destinationPath: String? = nil, baseEntry: RemoteEntry? = nil
+        destinationPath: String? = nil, baseEntry: RemoteEntry? = nil, deletionContextID: String? = nil
     ) {
         self.idempotencyKey = idempotencyKey
         self.itemID = itemID
@@ -148,6 +150,7 @@ public struct JournalIntent: Codable, Equatable, Sendable {
         self.sourcePath = sourcePath
         self.destinationPath = destinationPath
         self.baseEntry = baseEntry
+        self.deletionContextID = deletionContextID
     }
 }
 
