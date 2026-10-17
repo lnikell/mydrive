@@ -3,6 +3,7 @@ import SwiftUI
 
 @MainActor struct UninstallView: View {
     @Bindable var model: AppModel
+    let requestQuit: () -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var operation: Task<Void, Never>?
 
@@ -68,7 +69,7 @@ import SwiftUI
 
     private func quitAndReveal() {
         guard model.uninstall.ready, !model.busy else { return }
-        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
-        NSApplication.shared.terminate(nil)
+        requestQuit()
+        dismiss()
     }
 }

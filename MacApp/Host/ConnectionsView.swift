@@ -16,6 +16,7 @@ private struct ConnectionSheetRequest: Identifiable {
     @State private var showingLoadIssues = false
     @State private var showingRetainedWork = false
     @State private var showingUninstall = false
+    @State private var quitRequested = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -67,7 +68,9 @@ private struct ConnectionSheetRequest: Identifiable {
             DriveConnectionSheet(model: model, settings: request.settings, drive: request.drive)
         }
         .sheet(isPresented: $showingRetainedWork, onDismiss: presentRequestedUninstall) { RetainedWorkView(locations: model.retainedWork) }
-        .sheet(isPresented: $showingUninstall) { UninstallView(model: model) }
+        .sheet(isPresented: $showingUninstall, onDismiss: uninstallDismissed) {
+            UninstallView(model: model, requestQuit: requestUninstallQuit)
+        }
         .confirmationDialog(
             "Disconnect \(removingDrive?.name ?? "this drive") and remove local downloads?",
             isPresented: Binding(get: { removingDrive != nil }, set: { if !$0 { removingDrive = nil } }),
@@ -130,6 +133,21 @@ private struct ConnectionSheetRequest: Identifiable {
               !showingRetainedWork, !showingLoadIssues else { return }
         uninstallRequested = false
         showingUninstall = true
+    }
+
+    private func requestUninstallQuit() {
+        guard model.uninstall.ready, !model.busy else { return }
+        quitRequested = true
+    }
+
+    private func uninstallDismissed() {
+        guard quitRequested else { return }
+        quitRequested = false
+        guard model.uninstall.ready, !model.busy else { return }
+        // Terminating while a sheet is still attached can cancel termination.
+        // SwiftUI's dismissal callback is the lifecycle barrier for this action.
+        NSWorkspace.shared.activateFileViewerSelecting([Bundle.main.bundleURL])
+        NSApplication.shared.terminate(nil)
     }
 }
 
