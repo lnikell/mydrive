@@ -1,6 +1,6 @@
 # Releasing MyDrive
 
-The same scripts prepare a local release and a GitHub Actions release for [lnikell/mydrive](https://github.com/lnikell/mydrive). Apple distribution signing and CI secrets still require setup. `python3 tools/release.py doctor` lists what is missing. No published app update or successful signed upgrade is claimed until those steps run against real credentials.
+The same scripts prepare a local release and a GitHub Actions release for [lnikell/mydrive](https://github.com/lnikell/mydrive). CI selects Xcode 26.2 (Swift 6.2.3 and macOS SDK 26.2) and Rust 1.93.0; the deployment target remains macOS 15. Apple distribution signing and CI secrets still require setup. `python3 tools/release.py doctor` lists what is missing. No published app update or successful signed upgrade is claimed until those steps run against real credentials.
 
 ## One-time setup
 
