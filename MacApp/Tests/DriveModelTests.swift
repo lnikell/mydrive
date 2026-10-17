@@ -30,6 +30,8 @@ private struct DriveTestFailure: LocalizedError {
     var failActivation: Set<String> = []
     var failRemoval: Set<String> = []
     var holdVerification: Set<String> = []
+    var holdRemoval: Set<String> = []
+    var failRegistrationRead = false
     var verification: [ConnectionSettings] = []
     var activation: [ConnectionSettings] = []
     var actions: [(String, DriveAction)] = []
@@ -37,10 +39,12 @@ private struct DriveTestFailure: LocalizedError {
     var registrationReads = 0
     var holdRegistration = false
     var removalEvidence: ConnectionRemoval?
+    var removalEvidenceByID: [String: ConnectionRemoval] = [:]
 
     init(store: ConnectionStore) { self.store = store }
     func registeredDomainIDs() async throws -> Set<String> {
         registrationReads += 1
+        if failRegistrationRead { throw DriveTestFailure(message: "Registration lookup refused") }
         if holdRegistration { try await Task.sleep(for: .seconds(60)) }
         return registered
     }
@@ -63,10 +67,11 @@ private struct DriveTestFailure: LocalizedError {
     }
     func remove(_ settings: ConnectionSettings, store: ConnectionStore) async throws -> ConnectionRemoval {
         removals.append(settings.id)
+        if holdRemoval.contains(settings.id) { try await Task.sleep(for: .seconds(60)) }
         if failRemoval.contains(settings.id) { throw DriveTestFailure(message: "Removal refused") }
         registered.remove(settings.id)
         _ = try store.removeUnregisteredSettings(settings)
-        return removalEvidence ?? ConnectionRemoval(preservedURL: nil, cleanupFailures: [])
+        return removalEvidenceByID[settings.id] ?? removalEvidence ?? ConnectionRemoval(preservedURL: nil, cleanupFailures: [])
     }
 }
 
@@ -174,9 +179,115 @@ private struct DriveTestFailure: LocalizedError {
         await retryModel.shutdown()
         print("PASS cancelled startup retries registration instead of caching a false disconnected state")
 
+        try await uninstallPreparation()
+
         #if MYDRIVE_DEVELOPMENT
         try await developmentRegistration()
         #endif
+    }
+
+    @MainActor private struct UninstallFixture {
+        let root: URL
+        let store: ConnectionStore
+        let backend: FakeDrives
+        let model: AppModel
+        let clocks: [DriveWait]
+        func close() async { await model.shutdown(); try? FileManager.default.removeItem(at: root) }
+    }
+
+    @MainActor private static func uninstallFixture() async throws -> UninstallFixture {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = ConnectionStore(root: root), backend = FakeDrives(store: store)
+        let a = connection("A"), b = connection("B")
+        try store.save(a); try store.save(b); backend.registered = [a.id, b.id]
+        var clocks: [DriveWait] = []
+        let model = AppModel(store: .success(store), backend: backend, makeMonitor: {
+            let clock = DriveWait(); clocks.append(clock); return ConnectionMonitor(wait: clock.sleep)
+        }, launchArguments: [])
+        await model.startup()
+        try await eventually("Uninstall fixture monitors did not finish their initial refresh") { clocks.map(\.count).reduce(0, +) == 2 }
+        return UninstallFixture(root: root, store: store, backend: backend, model: model, clocks: clocks)
+    }
+
+    @MainActor private static func uninstallPreparation() async throws {
+        let clean = try await uninstallFixture()
+        let ids = clean.model.drives.map(\.id), exported = clean.root.appendingPathComponent("Exported edits")
+        let recovery = clean.root.appendingPathComponent("Retained uploads")
+        clean.backend.removalEvidenceByID[ids[0]] = ConnectionRemoval(preservedURL: exported, cleanupFailures: [], recoveryURLs: [recovery])
+        await clean.model.prepareForUninstall()
+        try check(clean.backend.removals == ids && clean.model.drives.isEmpty && clean.backend.registered.isEmpty &&
+                  clean.model.uninstall.ready && !clean.model.busy && clean.backend.registrationReads == 2,
+                  "Uninstall did not sequentially remove both drives and freshly verify empty registrations")
+        try check(Set(clean.model.retainedWork) == Set([exported, recovery]), "Bulk removal lost preserved OS work or upload recovery locations")
+        await clean.close()
+        print("PASS uninstall sequentially disconnects two drives, retains all work links and verifies empty Finder registrations")
+
+        let partial = try await uninstallFixture(), failedID = partial.model.drives[0].id
+        partial.backend.failRemoval.insert(failedID)
+        await partial.model.prepareForUninstall()
+        try check(!partial.model.uninstall.ready && partial.model.drives.map(\.id) == [failedID] &&
+                  partial.backend.removals.count == 2 && partial.model.uninstall.issues.contains { $0.contains("Removal refused") },
+                  "Partial removal abandoned its failed drive, skipped another drive or claimed readiness")
+        try await eventually("Failed bulk removal did not restore its own monitor") { partial.clocks.map(\.count).reduce(0, +) == 1 }
+        await partial.close()
+        print("PASS partial uninstall preserves the failed drive and monitor while completing the other removal")
+
+        let warning = try await uninstallFixture()
+        warning.backend.removalEvidence = ConnectionRemoval(preservedURL: nil, cleanupFailures: ["Saved credentials could not be removed"])
+        await warning.model.prepareForUninstall()
+        await warning.model.prepareForUninstall()
+        try check(warning.model.drives.isEmpty && !warning.model.uninstall.ready &&
+                  warning.model.uninstall.issues.contains { $0.contains("Saved credentials") },
+                  "A cleanup warning disappeared on retry or became a clean uninstall claim")
+        await warning.close()
+        print("PASS successful OS removal with cleanup warnings remains visible and cannot claim uninstall readiness")
+
+        let unknown = try await uninstallFixture(), broken = connection("Unreadable")
+        try unknown.store.save(broken)
+        try Data("{malformed".utf8).write(to: unknown.store.folder(for: broken.id).appendingPathComponent("connection.json"))
+        unknown.backend.registered.insert("unknown-domain")
+        await unknown.model.prepareForUninstall()
+        try check(!unknown.model.uninstall.ready && unknown.backend.registered == ["unknown-domain"] &&
+                  unknown.model.loadIssues.contains { $0.id == broken.id } &&
+                  unknown.model.loadIssues.contains { $0.id == "missing-unknown-domain" },
+                  "Unknown registrations or unreadable saved records were treated as safe to uninstall")
+        await unknown.close()
+        let unread = try await uninstallFixture(); unread.backend.failRegistrationRead = true
+        await unread.model.prepareForUninstall()
+        try check(!unread.model.uninstall.ready && unread.model.uninstall.issues.contains { $0.contains("registrations could not be checked") },
+                  "A failed final registration query was treated as empty Finder state")
+        await unread.close()
+        print("PASS unknown Finder domains, malformed records and unreadable registration state all prevent uninstall readiness")
+
+        let cancelled = try await uninstallFixture(), first = cancelled.model.drives[0], second = cancelled.model.drives[1]
+        cancelled.backend.holdRemoval.insert(first.id)
+        let preparing = Task { await cancelled.model.prepareForUninstall() }
+        try await eventually("Bulk removal did not reach the held backend call") {
+            first.busy && cancelled.model.busy && cancelled.backend.removals == [first.id]
+        }
+        let verificationCount = cancelled.backend.verification.count, actionCount = cancelled.backend.actions.count
+        let reconnectBlocked = await cancelled.model.reconnect(second, password: "synthetic")
+        let addBlocked = await cancelled.model.add(connection("Blocked"), password: "synthetic")
+        let removeBlocked = await cancelled.model.remove(second)
+        try check(!reconnectBlocked && !addBlocked && !removeBlocked, "An existing sheet/add/removal bypassed bulk busy")
+        await cancelled.model.perform(.refresh, on: second)
+        await cancelled.model.prepareForUninstall()
+        try check(cancelled.backend.verification.count == verificationCount && cancelled.backend.actions.count == actionCount &&
+                  cancelled.backend.removals == [first.id], "Bulk interlock allowed a retargeted or duplicate backend call")
+        preparing.cancel(); await preparing.value
+        try check(cancelled.model.drives.count == 2 && !cancelled.model.uninstall.ready && !cancelled.model.busy &&
+                  cancelled.backend.removals == [first.id], "Cancellation removed a remaining drive or released false readiness")
+        try await eventually("Cancelled removal did not restore registered monitors") { cancelled.clocks.map(\.count).reduce(0, +) == 2 }
+        cancelled.backend.holdRemoval.remove(first.id)
+        cancelled.backend.holdVerification.insert(first.id)
+        let reconnecting = Task { await cancelled.model.reconnect(first, password: "synthetic") }
+        try await eventually("Reconnect did not acquire its drive") { first.busy }
+        await cancelled.model.prepareForUninstall()
+        try check(cancelled.backend.removals == [first.id] && !cancelled.model.uninstall.ready,
+                  "Uninstall started while another drive operation was already active")
+        reconnecting.cancel(); _ = await reconnecting.value
+        await cancelled.close()
+        print("PASS bulk busy blocks existing-sheet/model actions; cancellation drains the current removal and preserves remaining drives")
     }
 
     #if MYDRIVE_DEVELOPMENT

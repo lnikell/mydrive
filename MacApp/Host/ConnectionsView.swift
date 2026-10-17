@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 private struct ConnectionSheetRequest: Identifiable {
@@ -9,9 +10,12 @@ private struct ConnectionSheetRequest: Identifiable {
 @MainActor struct ConnectionsView: View {
     @Bindable var model: AppModel
     @Binding var addRequested: Bool
+    @Binding var uninstallRequested: Bool
     @State private var sheet: ConnectionSheetRequest?
     @State private var removingDrive: DriveModel?
     @State private var showingLoadIssues = false
+    @State private var showingRetainedWork = false
+    @State private var showingUninstall = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -31,12 +35,15 @@ private struct ConnectionSheetRequest: Identifiable {
                     ForEach(model.drives) { drive in
                         ConnectionRow(drive: drive, reconnect: {
                             sheet = ConnectionSheetRequest(settings: drive.settings, drive: drive)
-                        }, disconnect: { removingDrive = drive })
+                        }, disconnect: { removingDrive = drive }, perform: { action in
+                            Task { await model.perform(action, on: drive) }
+                        })
                     }
                 }
                 .listStyle(.inset)
+                .disabled(model.busy)
             }
-            footer
+            if !model.status.isEmpty || !model.loadIssues.isEmpty || !model.retainedWork.isEmpty { footer }
         }
         .navigationTitle("MyDrive")
         .toolbar {
@@ -49,11 +56,18 @@ private struct ConnectionSheetRequest: Identifiable {
         .task {
             await model.startup()
             presentRequestedAdd()
+            presentRequestedUninstall()
         }
         .onChange(of: addRequested) { _, _ in presentRequestedAdd() }
-        .sheet(item: $sheet) { request in
+        .onChange(of: uninstallRequested) { _, _ in presentRequestedUninstall() }
+        .onChange(of: model.busy) { _, busy in if !busy { presentRequestedUninstall() } }
+        .onChange(of: showingLoadIssues) { _, showing in if !showing { presentRequestedUninstall() } }
+        .onChange(of: removingDrive?.id) { _, id in if id == nil { presentRequestedUninstall() } }
+        .sheet(item: $sheet, onDismiss: presentRequestedUninstall) { request in
             DriveConnectionSheet(model: model, settings: request.settings, drive: request.drive)
         }
+        .sheet(isPresented: $showingRetainedWork, onDismiss: presentRequestedUninstall) { RetainedWorkView(locations: model.retainedWork) }
+        .sheet(isPresented: $showingUninstall) { UninstallView(model: model) }
         .confirmationDialog(
             "Disconnect \(removingDrive?.name ?? "this drive") and remove local downloads?",
             isPresented: Binding(get: { removingDrive != nil }, set: { if !$0 { removingDrive = nil } }),
@@ -66,7 +80,7 @@ private struct ConnectionSheetRequest: Identifiable {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Files on the NAS are kept. macOS preserves any pending local work. This removes this drive’s Finder location, downloads and connection settings.")
+            Text("Files on the NAS are kept. Clean local downloads are removed. Pending edits and upload recovery data are preserved, with an option to show them in Finder.")
         }
         .alert("Saved Drive Issues", isPresented: $showingLoadIssues) {
             Button("OK", role: .cancel) {}
@@ -84,10 +98,10 @@ private struct ConnectionSheetRequest: Identifiable {
                 }
             }
             HStack(alignment: .firstTextBaseline) {
-                Text(AppStorage.isDevelopmentStorage
-                     ? "Development · Read-only · Credentials last 15 minutes."
-                     : "Read-only preview · Keep files downloaded using Finder.")
-                    .font(.caption).foregroundStyle(.secondary)
+                if !model.retainedWork.isEmpty {
+                    Button("Show Retained Work…") { showingRetainedWork = true }
+                        .font(.caption)
+                }
                 Spacer(minLength: 4)
                 if !model.loadIssues.isEmpty {
                     Button("Saved Drive Issues…") { showingLoadIssues = true }
@@ -101,7 +115,7 @@ private struct ConnectionSheetRequest: Identifiable {
     }
 
     private func presentAdd() {
-        guard !model.busy, sheet == nil, removingDrive == nil else { return }
+        guard !model.busy, !showingUninstall, sheet == nil, removingDrive == nil else { return }
         sheet = ConnectionSheetRequest(settings: model.makeDraft(), drive: nil)
     }
 
@@ -110,12 +124,40 @@ private struct ConnectionSheetRequest: Identifiable {
         addRequested = false
         presentAdd()
     }
+
+    private func presentRequestedUninstall() {
+        guard uninstallRequested, !model.busy, sheet == nil, removingDrive == nil,
+              !showingRetainedWork, !showingLoadIssues else { return }
+        uninstallRequested = false
+        showingUninstall = true
+    }
+}
+
+@MainActor private struct RetainedWorkView: View {
+    let locations: [URL]
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Retained Local Work").font(.title2.weight(.semibold))
+            Text("These files were kept when a drive was disconnected. Review them before removing anything you still need.")
+                .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            List(locations, id: \.self) { location in
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(location.path).font(.callout).textSelection(.enabled)
+                    Button("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([location]) }
+                }.padding(.vertical, 6)
+            }.frame(height: 220)
+            HStack { Spacer(); Button("Done") { dismiss() }.keyboardShortcut(.defaultAction) }
+        }.padding(24).frame(width: 480)
+    }
 }
 
 @MainActor private struct ConnectionRow: View {
     @Bindable var drive: DriveModel
     let reconnect: () -> Void
     let disconnect: () -> Void
+    let perform: (DriveAction) -> Void
 
     var body: some View {
         HStack(alignment: .center, spacing: 12) {
@@ -134,11 +176,11 @@ private struct ConnectionSheetRequest: Identifiable {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             if drive.busy { ProgressView().controlSize(.small) }
-            Button("Open in Finder") { Task { await drive.openFinder() } }.disabled(drive.busy)
+            Button("Open in Finder") { perform(.openFinder) }.disabled(drive.busy)
             Menu {
                 Button("Reconnect…", action: reconnect)
-                Button("Refresh") { Task { await drive.refresh() } }
-                Button("Free Up Space") { Task { await drive.offloadAll() } }
+                Button("Refresh") { perform(.refresh) }
+                Button("Free Up Space") { perform(.offloadAll) }
                 Divider()
                 Button("Disconnect…", role: .destructive, action: disconnect)
             } label: {

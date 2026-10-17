@@ -88,7 +88,7 @@ import SwiftUI
         settings = candidate
         submission = Task {
             let success: Bool
-            if let drive { success = await drive.reconnect(password: secret) }
+            if let drive { success = await model.reconnect(drive, password: secret) }
             else { success = await model.add(candidate, password: secret) }
             submitting = false
             guard !Task.isCancelled else { return }
