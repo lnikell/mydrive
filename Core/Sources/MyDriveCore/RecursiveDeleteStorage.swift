@@ -136,9 +136,9 @@ extension Catalog {
         return left.digest == right.digest
     }
 
-    private static let deleteNodeColumns = "item_id,parent_id,observation,path,depth,parent_index,parent_created,child_operation_key,captured,removed,blocked_code"
+    static let deleteNodeColumns = "item_id,parent_id,observation,path,depth,parent_index,parent_created,child_operation_key,captured,removed,blocked_code"
 
-    private static func decodeDeleteNode(_ row: SQLStatement) throws -> DeleteNode {
+    static func decodeDeleteNode(_ row: SQLStatement) throws -> DeleteNode {
         let json = row.text(2)
         guard json.utf8.count <= 65_536, let index = UInt64(row.text(5)), let created = UInt64(row.text(6)),
               let key = UUID(uuidString: row.text(7)) else { throw CatalogError.invalidEntry }
