@@ -369,9 +369,12 @@ dependencies = [
 name = "nas-transport"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "futures-util",
+ "libc",
  "serde",
  "serde_json",
+ "sha2",
  "smb2",
  "thiserror",
  "tokio",

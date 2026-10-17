@@ -135,18 +135,28 @@ class Helper:
         operation = copy.deepcopy(operation)
         if re.fullmatch(r"\.mydrive-transport-tests/mutations-[0-9a-f]{32}", self.root) is None:
             raise BenchmarkError("native mutation checks require a generated mutation-trial root")
-        if not isinstance(operation, dict) or operation.get("type") not in ("stat", "mutate", "reconcile"):
+        if not isinstance(operation, dict) or operation.get("type") not in ("stat", "list", "mutate", "reconcile"):
             raise BenchmarkError("unsupported native trial operation")
-        if operation["type"] == "stat":
-            if set(operation) != {"type", "path"}:
-                raise BenchmarkError("malformed native stat request")
+        reading = operation["type"] in ("stat", "list")
+        scope = None
+        if reading:
+            if set(operation) - {"type", "path", "delete_scope"} or "path" not in operation:
+                raise BenchmarkError("malformed native read request")
             paths = [operation["path"]]
+            scope = operation.get("delete_scope")
         else:
             if set(operation) != {"type", "request"} or not isinstance(operation["request"], dict):
                 raise BenchmarkError("malformed native mutation request")
             mutation = operation["request"]
-            if set(mutation) - {"operation_id", "kind", "path", "destination", "expected", "payload", "receipt"}:
+            if set(mutation) - {"operation_id", "kind", "path", "destination", "expected", "payload", "receipt", "parent", "destination_parent", "delete_scope"}:
                 raise BenchmarkError("unexpected native mutation fields")
+            for field in ("parent", "destination_parent"):
+                identity = mutation.get(field)
+                required = field == "parent" or mutation.get("kind") == "move"
+                if identity is None and not required:
+                    continue
+                if not self._safe_identity(identity):
+                    raise BenchmarkError("native mutation omitted a safe typed parent identity")
             paths = [mutation.get("path")]
             if mutation.get("destination") is not None:
                 paths.append(mutation["destination"])
@@ -158,16 +168,34 @@ class Helper:
                     if not isinstance(artifact, dict):
                         raise BenchmarkError("malformed mutation artifact")
                     paths.append(artifact.get("path"))
-        if any(not isinstance(path, str) or not path.startswith(self.root + "/")
-               or any(part in ("", ".", "..") for part in path.split("/"))
-               or "\\" in path or "\0" in path for path in paths):
+            scope = mutation.get("delete_scope")
+            if scope is not None and mutation.get("kind") not in ("delete", "cleanup"):
+                raise BenchmarkError("deletion scope cannot authorize an ordinary write")
+        if any(not self._inside_trial(path, allow_root=reading) for path in paths):
             raise BenchmarkError("native trial operation is outside its generated namespace")
+        if scope is not None:
+            if (not isinstance(scope, dict) or set(scope) != {"root_path", "root", "parent"}
+                    or not self._inside_trial(scope.get("root_path"), allow_root=True)
+                    or len(scope["root_path"].encode("utf-8")) > 4096
+                    or not all(self._safe_identity(scope[key]) for key in ("root", "parent"))
+                    or any(path != scope["root_path"] and not path.startswith(scope["root_path"] + "/") for path in paths)):
+                raise BenchmarkError("invalid frozen deletion scope")
         request = {"version": 1, **self.target, "password": self.password.decode("utf-8"), "operation": operation}
         data = json.dumps(request, ensure_ascii=False).encode()
         if len(data) > 65_536:
             raise BenchmarkError("native request exceeds its input limit")
         return self._execute([str(self.binary), "--request-stdin"], data,
                              {"command": operation["type"], "operation": operation}, expect_error)
+
+    @staticmethod
+    def _safe_identity(identity):
+        return (isinstance(identity, dict) and set(identity) == {"index_number", "created_filetime"}
+                and all(type(value) is int and 0 < value < 2 ** 64 for value in identity.values()))
+
+    def _inside_trial(self, path, *, allow_root):
+        return (isinstance(path, str) and (path.startswith(self.root + "/") or (allow_root and path == self.root))
+                and all(part not in ("", ".", "..") for part in path.split("/"))
+                and "\\" not in path and "\0" not in path)
 
     def _execute(self, args, input_bytes, record, expect_error):
         self.report["operations"].append(record)

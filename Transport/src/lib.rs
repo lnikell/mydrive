@@ -5,15 +5,21 @@
 //! Cancellation invalidates the session; construct a new session afterward.
 
 use futures_util::{stream::FuturesOrdered, StreamExt};
-use serde::Serialize;
-use smb2::{ClientConfig, ListOptions, RenameOptions, SmbClient, Tree};
+use serde::{Deserialize, Serialize};
+use smb2::{ClientConfig, RenameOptions, SmbClient, Tree};
 use std::{path::Path, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 pub use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 mod connection_readiness;
+mod content_metadata;
 mod guarded_read;
+pub mod mutation;
+mod mutation_io;
+mod mutation_security;
+#[cfg(test)]
+mod test_wire;
 
 pub const CHUNK_BYTES: usize = 256 * 1024;
 pub const READ_WINDOW: usize = 8;
@@ -38,6 +44,12 @@ pub enum Error {
     Cleanup,
     #[error("the file version or confirmed transfer length changed")]
     Changed,
+    #[error("the frozen recursive deletion selection changed")]
+    ScopeChanged,
+    #[error("the directory is not empty")]
+    DirectoryNotEmpty,
+    #[error("a dispatched mutation could not be verified; reconcile before retrying")]
+    CommitUncertain,
 }
 
 impl Error {
@@ -51,6 +63,9 @@ impl Error {
             Self::Cancelled => "cancelled",
             Self::Cleanup => "cleanup_timeout",
             Self::Changed => "changed",
+            Self::ScopeChanged => "scope_changed",
+            Self::DirectoryNotEmpty => "directory_not_empty",
+            Self::CommitUncertain => "commit_uncertain",
             Self::Io(_) => "local_io",
             Self::Smb(kind) => match kind {
                 S::AuthRequired => "auth_required",
@@ -118,7 +133,8 @@ pub struct Security {
     pub write_budget_bytes: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct Entry {
     pub name: String,
     pub bytes: u64,
@@ -134,6 +150,14 @@ pub struct Entry {
 pub struct Download {
     pub bytes: u64,
     /// Same-handle metadata that agreed before and after the guarded read.
+    pub entry: Entry,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Listing {
+    pub entries: usize,
+    pub complete: bool,
+    /// The actual reserved directory handle used for every emitted batch.
     pub entry: Entry,
 }
 
@@ -219,6 +243,101 @@ pub struct Nas {
 }
 
 impl Nas {
+    /// Observe an ordinary item without following reparse points. A missing
+    /// path is a successful `None`; permissions and unsupported metadata fail.
+    pub async fn stat(&self, path: &str, cancel: &CancellationToken) -> Result<Option<Entry>> {
+        self.stat_scoped(path, None, cancel).await
+    }
+
+    /// Absence is observed while the frozen selection's directory objects stay
+    /// reserved. It does not authorize adopting a different object at the path.
+    pub async fn stat_scoped(
+        &self,
+        path: &str,
+        scope: Option<&mutation::DeleteScope>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Entry>> {
+        use mutation::Remote;
+        validate_path(path, true)?;
+        let mut io = if let Some(scope) = scope {
+            mutation_io::MutationIO::for_scoped_stat(
+                self.client.connection().clone(),
+                &self.tree,
+                path,
+                scope,
+                cancel,
+            )
+            .await?
+        } else {
+            mutation_io::MutationIO::new(
+                self.client.connection().clone(),
+                &self.tree,
+                &[path],
+                cancel,
+            )
+            .await?
+        };
+        let result = if let Some(scope) = scope {
+            io.stat_in_scope(path, scope).await
+        } else {
+            io.stat(path).await
+        };
+        let closed = io.close_checked().await;
+        result.and_then(|entry| closed.map(|()| entry))
+    }
+
+    /// The complete intent must already be durable in the caller. `prepared`
+    /// requires persisting its receipt before a second invocation publishes.
+    pub async fn mutate(
+        &self,
+        request: &mutation::MutationRequest,
+        reconcile: bool,
+        cancel: &CancellationToken,
+        mut progress: impl FnMut(u64),
+    ) -> Result<mutation::MutationResult> {
+        request.validate()?;
+        if let Some(root) = &self.mutation_root {
+            let prefix = format!("{root}/");
+            if !request.path.starts_with(&prefix)
+                || request
+                    .destination
+                    .as_ref()
+                    .is_some_and(|path| !path.starts_with(&prefix))
+                || request.delete_scope.as_ref().is_some_and(|scope| {
+                    scope.root_path != *root && !scope.root_path.starts_with(&prefix)
+                })
+            {
+                return Err(Error::Input(
+                    "native mutation is outside the configured experiment root",
+                ));
+            }
+        }
+        let mut payload = if !reconcile {
+            match &request.payload {
+                Some(payload) => Some(mutation::VerifiedPayload::open(payload, cancel).await?),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let mut io = match mutation_io::MutationIO::for_mutation(
+            self.client.connection().clone(),
+            &self.tree,
+            request,
+            cancel,
+        )
+        .await
+        {
+            Ok(io) => io,
+            Err(Error::Changed) => return Ok(mutation::parent_changed(request)),
+            Err(Error::ScopeChanged) => return Ok(mutation::scope_changed(request)),
+            Err(error) => return Err(error),
+        };
+        let result =
+            mutation::run(&mut io, request, payload.as_mut(), reconcile, &mut progress).await;
+        io.close().await;
+        Ok(result)
+    }
     pub async fn connect(config: Connection) -> Result<Self> {
         if config.share.is_empty() {
             return Err(Error::Input("a share is required"));
@@ -253,61 +372,30 @@ impl Nas {
         path: &str,
         page_limit: Option<usize>,
         cancel: &CancellationToken,
-        mut page: impl FnMut(Vec<Entry>) -> Result<()>,
-    ) -> Result<(usize, bool)> {
+        page: impl FnMut(Vec<Entry>) -> Result<()>,
+    ) -> Result<Listing> {
+        self.list_scoped(path, page_limit, None, cancel, page).await
+    }
+
+    pub async fn list_scoped(
+        &mut self,
+        path: &str,
+        page_limit: Option<usize>,
+        scope: Option<&mutation::DeleteScope>,
+        cancel: &CancellationToken,
+        page: impl FnMut(Vec<Entry>) -> Result<()>,
+    ) -> Result<Listing> {
         validate_path(path, true)?;
-        let mut reader = tokio::select! {
-            biased;
-            _ = cancel.cancelled() => {
-                self.client.connection().mark_dead();
-                return Err(Error::Cancelled);
-            }
-            reader = self.client.open_directory_reader_with(
-                &mut self.tree,
-                path,
-                ListOptions::new().index_numbers(true),
-            ) => reader?,
-        };
-        let outcome = async {
-            let mut count = 0;
-            let mut pages = 0;
-            loop {
-                let batch = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(Error::Cancelled),
-                    result = reader.next_batch() => result?,
-                };
-                let Some(batch) = batch else {
-                    return Ok((count, true));
-                };
-                let entries: Vec<_> = batch
-                    .into_iter()
-                    .filter(|e| e.name != "." && e.name != "..")
-                    .map(|e| Entry {
-                        name: e.name,
-                        bytes: e.size,
-                        directory: e.is_directory,
-                        index_number: e.index_number,
-                        created_filetime: e.created.0,
-                        modified_filetime: e.modified.0,
-                        changed_filetime: e.changed.0,
-                        attributes: e.attributes.bits(),
-                    })
-                    .collect();
-                count += entries.len();
-                page(entries)?;
-                pages += 1;
-                if page_limit.is_some_and(|limit| pages >= limit) {
-                    return Ok((count, false));
-                }
-            }
-        }
-        .await;
-        if matches!(outcome, Err(Error::Cancelled)) {
-            self.client.connection().mark_dead();
-        }
-        let cleanup = tokio::time::timeout(CLEANUP_TIMEOUT, reader.close()).await;
-        self.finish_cleanup(outcome, cleanup)
+        mutation_io::listing::read(
+            self.client.connection().clone(),
+            &self.tree,
+            path,
+            page_limit,
+            scope,
+            cancel,
+            page,
+        )
+        .await
     }
 
     /// Writes a new local destination, using eight positioned reads of at most

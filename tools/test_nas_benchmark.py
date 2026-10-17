@@ -189,7 +189,8 @@ time.sleep(999)
         helper = benchmark.Helper(self.helper, b"not-a-real-password", root,
                                   {"operations": []}, lambda: None, target=PUBLIC_TARGET)
         operation = {"type": "mutate", "request": {"kind": "create_file", "path": root + "/file",
-                     "operation_id": "12345678-1234-4234-8234-1234567890ab", "receipt": {}}}
+                     "operation_id": "12345678-1234-4234-8234-1234567890ab", "receipt": {},
+                     "parent": {"index_number": 1, "created_filetime": 2}}}
         records = []
         def capture(_args, _input, record, _expect_error):
             records.append(record)
@@ -198,6 +199,50 @@ time.sleep(999)
         operation["request"]["receipt"]["staged"] = {"path": root + "/later"}
         self.assertEqual(records[0]["operation"]["request"]["receipt"], {})
         self.assertNotIn("not-a-real-password", json.dumps(records))
+
+    def test_native_parent_identity_and_root_stat_guards(self):
+        root = ".mydrive-transport-tests/mutations-123456781234423482341234567890ab"
+        helper = benchmark.Helper(self.helper, b"not-a-real-password", root,
+                                  {"operations": []}, lambda: None, target=PUBLIC_TARGET)
+        request = {"kind": "create_directory", "path": root + "/folder", "operation_id": "12345678-1234-4234-8234-1234567890ab"}
+        with patch.object(helper, "_execute") as execute:
+            helper.run_request({"type": "stat", "path": root})
+            execute.assert_called_once()
+            execute.reset_mock()
+            for identity in (None, {}, {"index_number": True, "created_filetime": 2},
+                             {"index_number": 1, "created_filetime": 0},
+                             {"index_number": 2 ** 64, "created_filetime": 2}):
+                with self.subTest(identity=identity), self.assertRaisesRegex(benchmark.BenchmarkError, "parent identity"):
+                    helper.run_request({"type": "mutate", "request": {**request, "parent": identity}})
+            execute.assert_not_called()
+            with self.assertRaises(benchmark.BenchmarkError):
+                helper.run_request({"type": "stat", "path": root + "-other"})
+
+    def test_frozen_delete_scope_never_expands_generated_namespace(self):
+        root = ".mydrive-transport-tests/mutations-123456781234423482341234567890ab"
+        helper = benchmark.Helper(self.helper, b"not-a-real-password", root,
+                                  {"operations": []}, lambda: None, target=PUBLIC_TARGET)
+        identity = {"index_number": 1, "created_filetime": 2}
+        scope = {"root_path": root + "/folder", "root": identity, "parent": identity}
+        request = {"kind": "delete", "path": root + "/folder/file", "parent": identity,
+                   "operation_id": "12345678-1234-4234-8234-1234567890ab", "delete_scope": scope}
+        with patch.object(helper, "_execute") as execute:
+            helper.run_request({"type": "stat", "path": scope["root_path"], "delete_scope": scope})
+            helper.run_request({"type": "list", "path": scope["root_path"], "delete_scope": scope})
+            helper.run_request({"type": "mutate", "request": request})
+            self.assertEqual(execute.call_count, 3)
+            execute.reset_mock()
+            bad_requests = [
+                {**request, "path": root + "/folder-other/file"},
+                {**request, "kind": "create_file"},
+                {**request, "path": root, "delete_scope": {**scope, "root_path": root}},
+                {**request, "delete_scope": {**scope, "root_path": root + "-other"}},
+                {**request, "delete_scope": {**scope, "parent": {**identity, "index_number": True}}},
+            ]
+            for invalid in bad_requests:
+                with self.subTest(request=invalid), self.assertRaises(benchmark.BenchmarkError):
+                    helper.run_request({"type": "mutate", "request": invalid})
+            execute.assert_not_called()
 
     @staticmethod
     def finish_partial():

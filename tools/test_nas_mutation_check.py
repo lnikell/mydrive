@@ -11,7 +11,7 @@ from nas_mutation_check import MutationTrial
 
 
 class FakeRemote:
-    """A small namespace oracle, with a real separate prepared identity.
+    """A small namespace oracle, with separate allocation/prepared identities.
 
     A final rename changes name/ChangeTime. Reconstructing a receipt from the
     final observation therefore fails these tests, even if bytes still match.
@@ -21,6 +21,7 @@ class FakeRemote:
     def __init__(self, fault=None):
         self.objects = {}
         self.prepared = {}
+        self.allocated = {}
         self.calls = []
         self.reconciled = []
         self.counter = 0
@@ -82,6 +83,14 @@ class FakeRemote:
         request = operation["request"]
         key, kind, path = request["operation_id"], request["kind"], request["path"]
         result = {"operation_id": key, "outcome": "committed", "code": "committed"}
+        parents = [(path.rpartition("/")[0], request.get("parent"))]
+        if kind == "move":
+            parents.append((request["destination"].rpartition("/")[0], request.get("destination_parent")))
+        for parent_path, expected_parent in parents:
+            parent = self.objects.get(parent_path, {}).get("entry", {})
+            identity = {field: parent.get(field) for field in ("index_number", "created_filetime")}
+            if expected_parent != identity or parent.get("directory") is not True:
+                return self.result({**result, "outcome": "conflict", "code": "parent_changed"})
         if operation["type"] == "reconcile":
             # Require the exact receipt seen before publication, not final Entry.
             if request.get("receipt", {}).get("staged") != self.prepared[key]:
@@ -101,9 +110,27 @@ class FakeRemote:
         if kind in ("create_directory", "create_file", "replace_file"):
             stage = path.rpartition("/")[0] + "/.mydrive-" + key + ".stage"
             if not request.get("receipt"):
-                body = Path(request["payload"]["source"]).read_bytes() if "payload" in request else b""
-                self.objects[stage] = {"entry": self.entry(stage, kind == "create_directory", body), "body": body}
-                artifact = {"path": stage, "entry": copy.deepcopy(self.objects[stage]["entry"]), "cleanup_safe": True}
+                self.objects[stage] = {"entry": self.entry(stage, kind == "create_directory"), "body": b""}
+                phase = "prepared" if kind == "create_directory" else "allocated"
+                artifact = {"path": stage, "entry": copy.deepcopy(self.objects[stage]["entry"]),
+                            "cleanup_safe": True, "phase": phase, "security_sha256": "a" * 64}
+                if phase == "allocated":
+                    self.allocated[key] = copy.deepcopy(artifact)
+                    if self.fault == "allocation_security":
+                        artifact.pop("security_sha256")
+                    elif self.fault == "allocation_nonempty":
+                        artifact["entry"]["bytes"] = 1
+                else:
+                    self.prepared[key] = copy.deepcopy(artifact)
+                return self.result({**result, "outcome": "not_applied", "code": phase, "staged": artifact})
+            if request["receipt"]["staged"].get("phase") == "allocated":
+                if request["receipt"]["staged"] != self.allocated[key]:
+                    raise BenchmarkError("continuation changed its allocation receipt")
+                body = Path(request["payload"]["source"]).read_bytes()
+                self.objects[stage]["body"] = body
+                self.objects[stage]["entry"]["bytes"] = len(body)
+                self.objects[stage]["entry"]["changed_filetime"] += 1
+                artifact = {**self.allocated[key], "entry": copy.deepcopy(self.objects[stage]["entry"]), "phase": "prepared"}
                 self.prepared[key] = copy.deepcopy(artifact)
                 return self.result({**result, "outcome": "not_applied", "code": "prepared", "staged": artifact})
             if request["receipt"]["staged"] != self.prepared[key]:
@@ -182,6 +209,43 @@ class MutationQualificationTests(unittest.TestCase):
         expected = copy.deepcopy(self.report["commits"])
         result["entry"]["name"] = "caller changed its copy"
         self.assertEqual(self.report["commits"], expected)
+
+    def test_request_freezes_parent_identity_and_refuses_a_same_path_replacement(self):
+        remote = FakeRemote()
+        trial = self.trial(remote)
+        remote.run("prepare")
+        request = trial.request("create_file", "file", body=b"retain locally")
+        saved = copy.deepcopy(request["parent"])
+        remote.objects[remote.root]["entry"] = remote.entry(remote.root, True)
+        with self.assertRaisesRegex(BenchmarkError, "parent_changed"):
+            trial.apply(request)
+        self.assertEqual(request["parent"], saved)
+        self.assertEqual(set(remote.objects), {remote.root})
+
+    def test_allocation_is_empty_and_exact_receipt_precedes_payload_transfer(self):
+        remote = FakeRemote()
+        trial = self.trial(remote)
+        remote.run("prepare")
+        trial.apply(trial.request("create_file", "file", body=b"verified body"))
+        calls = [value["request"] for kind, value in remote.calls if kind == "mutate"]
+        self.assertEqual(len(calls), 3)
+        allocation = calls[1]["receipt"]["staged"]
+        self.assertEqual(allocation["phase"], "allocated")
+        self.assertEqual(allocation["entry"]["bytes"], 0)
+        self.assertEqual(calls[2]["receipt"]["staged"]["phase"], "prepared")
+        self.assertEqual(remote.objects[remote.root + "/file"]["body"], b"verified body")
+
+    def test_invalid_allocation_receipt_stops_before_payload_continuation(self):
+        for fault in ("allocation_security", "allocation_nonempty"):
+            with self.subTest(fault=fault):
+                remote = FakeRemote(fault)
+                trial = self.trial(remote)
+                remote.run("prepare")
+                with self.assertRaisesRegex(BenchmarkError, "verified continuation"):
+                    trial.apply(trial.request("create_file", "file", body=b"retained"))
+                self.assertEqual(sum(kind == "mutate" for kind, _ in remote.calls), 1)
+                self.assertNotIn(remote.root + "/file", remote.objects)
+                self.assertTrue(remote.allocated)
 
 
 if __name__ == "__main__":

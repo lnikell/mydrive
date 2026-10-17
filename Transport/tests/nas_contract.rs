@@ -146,7 +146,7 @@ async fn signed_roundtrip_and_range_contract() -> Result<(), Box<dyn std::error:
     nas.rename("contract-original.bin", "contract-renamed.bin", false)
         .await?;
     let mut found = false;
-    let (_, complete) = nas
+    let listing = nas
         .list(&root, None, &cancel, |batch| {
             found |= batch
                 .iter()
@@ -154,7 +154,8 @@ async fn signed_roundtrip_and_range_contract() -> Result<(), Box<dyn std::error:
             Ok(())
         })
         .await?;
-    assert!(found && complete);
+    assert!(found && listing.complete);
+    assert!(listing.entry.directory && listing.entry.index_number.is_some());
     nas.delete("contract-renamed.bin", false).await?;
     nas.disconnect().await?;
     tokio::fs::remove_dir_all(&work).await?;

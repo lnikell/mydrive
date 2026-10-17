@@ -56,6 +56,7 @@ pub(crate) struct GuardedRead {
     max_read: u32,
     closed: bool,
     cancel: CancellationToken,
+    ancestors: Option<crate::mutation_io::MutationIO>,
 }
 
 impl GuardedRead {
@@ -70,21 +71,10 @@ impl GuardedRead {
         if tree.is_dfs {
             return Err(Error::Input("guarded reads require a direct non-DFS share"));
         }
-        let request = CreateRequest {
-            requested_oplock_level: OplockLevel::None,
-            impersonation_level: ImpersonationLevel::Impersonation,
-            desired_access: FileAccessMask::new(
-                FileAccessMask::FILE_READ_DATA
-                    | FileAccessMask::FILE_READ_ATTRIBUTES
-                    | FileAccessMask::SYNCHRONIZE,
-            ),
-            file_attributes: 0,
-            share_access: ShareAccess(ShareAccess::FILE_SHARE_READ),
-            create_disposition: CreateDisposition::FileOpen,
-            create_options: 0x0000_0040, // FILE_NON_DIRECTORY_FILE
-            name: smb2::encode_path(path),
-            create_contexts: vec![],
-        };
+        let ancestors =
+            crate::mutation_io::MutationIO::for_read(connection.clone(), tree, path, cancel)
+                .await?;
+        let request = read_request(path);
         let frame = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -112,6 +102,7 @@ impl GuardedRead {
             max_read,
             closed: false,
             cancel: cancel.clone(),
+            ancestors: Some(ancestors),
         })
     }
 
@@ -121,7 +112,9 @@ impl GuardedRead {
         let basic = self.query(4, 40).await?;
         let standard = self.query(5, 24).await?;
         let internal = self.query(6, 8).await?;
-        observation(&basic, &standard, &internal)
+        let observation = observation(&basic, &standard, &internal)?;
+        crate::content_metadata::require_plain_streams(&self.query(22, 64 * 1024).await?)?;
+        Ok(observation)
     }
 
     async fn query(&self, class: u8, length: u32) -> Result<Vec<u8>> {
@@ -197,6 +190,9 @@ impl GuardedRead {
             });
         }
         self.closed = true;
+        if let Some(ancestors) = self.ancestors.take() {
+            ancestors.close().await;
+        }
         Ok(())
     }
 }
@@ -211,7 +207,28 @@ impl Drop for GuardedRead {
     }
 }
 
+fn read_request(path: &str) -> CreateRequest {
+    CreateRequest {
+        requested_oplock_level: OplockLevel::None,
+        impersonation_level: ImpersonationLevel::Impersonation,
+        desired_access: FileAccessMask::new(
+            FileAccessMask::FILE_READ_DATA
+                | FileAccessMask::FILE_READ_ATTRIBUTES
+                | FileAccessMask::SYNCHRONIZE,
+        ),
+        file_attributes: 0,
+        share_access: ShareAccess(ShareAccess::FILE_SHARE_READ),
+        create_disposition: CreateDisposition::FileOpen,
+        create_options: 0x0020_0040, // FILE_OPEN_REPARSE_POINT | FILE_NON_DIRECTORY_FILE
+        name: smb2::encode_path(path),
+        create_contexts: vec![],
+    }
+}
+
 fn require_success(frame: &Frame, command: Command) -> Result<()> {
+    if frame.header.status == NtStatus(0xC000_0003) {
+        return Err(Error::Smb(smb2::ErrorKind::Unsupported));
+    }
     if frame.header.status != NtStatus::SUCCESS {
         return Err(smb2::Error::Protocol {
             status: frame.header.status,
@@ -232,6 +249,9 @@ fn observation(basic: &[u8], standard: &[u8], internal: &[u8]) -> Result<Observa
     let modified = basic.read_u64_le()?;
     let changed = basic.read_u64_le()?;
     let attributes = basic.read_u32_le()?;
+    if attributes & 0x400 != 0 {
+        return Err(Error::Smb(smb2::ErrorKind::Unsupported));
+    }
     let mut standard = ReadCursor::new(standard);
     standard.read_u64_le()?; // Allocation size is not content length.
     let size = standard.read_u64_le()?;
@@ -284,3 +304,7 @@ mod tests {
         assert_ne!(observation(&basic, &standard, &internal).unwrap(), initial);
     }
 }
+
+#[cfg(test)]
+#[path = "guarded_read_wire_tests.rs"]
+mod wire_tests;

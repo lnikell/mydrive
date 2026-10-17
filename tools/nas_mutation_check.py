@@ -3,6 +3,7 @@
 import copy
 import getpass
 import json
+import re
 from pathlib import Path
 import sys
 import uuid
@@ -26,7 +27,8 @@ class MutationTrial:
         return self.helper.root + "/" + relative
 
     def request(self, kind, relative, *, body=None, expected=None, destination=None):
-        request = {"kind": kind, "path": self.path(relative), "operation_id": str(uuid.uuid4())}
+        request = {"kind": kind, "path": self.path(relative), "operation_id": str(uuid.uuid4()),
+                   "parent": self.parent_identity(self.path(relative))}
         if body is not None:
             source = self.work / (str(uuid.uuid4()) + ".payload")
             source.write_bytes(body)
@@ -35,10 +37,20 @@ class MutationTrial:
             request["expected"] = expected
         if destination is not None:
             request["destination"] = self.path(destination)
+            request["destination_parent"] = self.parent_identity(request["destination"])
         return request
 
+    def parent_identity(self, path):
+        parent = self.helper.run_request({"type": "stat", "path": path.rpartition("/")[0]}).complete["result"]["entry"]
+        if not isinstance(parent, dict) or parent.get("directory") is not True:
+            raise BenchmarkError("mutation parent is not an observed directory")
+        identity = {key: parent.get(key) for key in ("index_number", "created_filetime")}
+        if any(type(value) is not int or not 0 < value < 2 ** 64 for value in identity.values()):
+            raise BenchmarkError("mutation parent lacks a safe identity")
+        return identity
+
     def apply(self, request):
-        # The first result's receipt is saved by Helper before its next request.
+        # Each result's receipt is saved by Helper before its next request.
         # Never continue an unknown outcome or replace a receipt with a guess.
         request = copy.deepcopy(request)
         for _ in range(3):
@@ -49,10 +61,20 @@ class MutationTrial:
                 self.report["commits"].append(copy.deepcopy({"request": request, "result": result}))
                 self.save()
                 return result
-            if result.get("outcome") != "not_applied" or result.get("code") != "prepared":
+            if (result.get("outcome") != "not_applied"
+                    or result.get("code") not in ("allocated", "prepared")):
                 raise BenchmarkError("mutation did not commit: " + str(result.get("code")))
+            artifact = result.get("staged")
+            entry = artifact.get("entry") if isinstance(artifact, dict) else None
+            if (not isinstance(artifact, dict)
+                    or artifact.get("phase", "prepared") != result["code"]
+                    or (result["code"] == "allocated"
+                        and (not isinstance(entry, dict)
+                             or type(entry.get("bytes")) is not int or entry["bytes"] != 0
+                             or re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("security_sha256"))) is None))):
+                raise BenchmarkError("mutation omitted its verified continuation receipt")
             request["receipt"] = {name: result[name] for name in ("staged", "archived") if result.get(name) is not None}
-        raise BenchmarkError("mutation did not complete its bounded prepared continuation")
+        raise BenchmarkError("mutation did not complete its bounded allocation/preparation continuation")
 
     def verify_bytes(self, relative, digest):
         destination = self.work / (str(uuid.uuid4()) + ".download")
@@ -71,7 +93,8 @@ class MutationTrial:
             if artifact.get("cleanup_safe") is not True:
                 raise BenchmarkError("original artifact requires inspection; no cleanup was attempted")
             request = {"kind": "cleanup", "operation_id": result["operation_id"],
-                       "path": artifact["path"], "expected": artifact["entry"]}
+                       "path": artifact["path"], "expected": artifact["entry"],
+                       "parent": self.parent_identity(artifact["path"])}
             self.apply(request)
 
     def assert_membership(self):
@@ -133,6 +156,14 @@ class MutationTrial:
         self.apply(self.request("move", name, destination=renamed, expected=self.stat(name)))
         digest = self.files.pop(name)
         self.verify_bytes(renamed, digest)
+        case_changed = "folder/rENAMED — cafe\u0301.txt"
+        self.apply(self.request("move", renamed, destination=case_changed, expected=self.stat(renamed)))
+        self.files.pop(renamed)
+        self.verify_bytes(case_changed, digest)
+        renamed = "folder/rENAMED — café.txt"
+        self.apply(self.request("move", case_changed, destination=renamed, expected=self.stat(case_changed)))
+        self.files.pop(case_changed)
+        self.verify_bytes(renamed, digest)
         self.assert_membership()
         # Verify all current bytes before the first intentional deletion.
         for path, digest in list(self.files.items()):
@@ -151,7 +182,8 @@ class MutationTrial:
         self.report["directories"] = sorted(self.directories)
         self.report["status"] = "passed"
         self.report["checks"] = ["staged receipt", "create", "committed replay identity", "obsolete replay conflict",
-                                 "replace", "stale-base conflict", "rename", "delete", "empty folder", "verified cleanup"]
+                                 "replace", "stale-base conflict", "rename", "case-only rename", "Unicode-only rename",
+                                 "delete", "empty folder", "verified cleanup"]
         self.save()
 
 

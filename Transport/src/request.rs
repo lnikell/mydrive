@@ -24,8 +24,26 @@ struct Request {
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum Operation {
     Probe {},
-    List { path: String },
-    Read { path: String, destination: String },
+    List {
+        path: String,
+        #[serde(default)]
+        delete_scope: Option<nas_transport::mutation::DeleteScope>,
+    },
+    Read {
+        path: String,
+        destination: String,
+    },
+    Stat {
+        path: String,
+        #[serde(default)]
+        delete_scope: Option<nas_transport::mutation::DeleteScope>,
+    },
+    Mutate {
+        request: nas_transport::mutation::MutationRequest,
+    },
+    Reconcile {
+        request: nas_transport::mutation::MutationRequest,
+    },
 }
 
 pub(super) fn read(input: impl Read) -> Result<(Args, Zeroizing<String>), Error> {
@@ -53,16 +71,32 @@ impl Request {
         {
             return Err(Error::Input(INVALID));
         }
-        let (command, paths) = match self.operation {
-            Operation::Probe {} => ("probe", vec![]),
-            Operation::List { path } if !path.contains('\0') => ("list", vec![path]),
+        let (command, paths, mutation, delete_scope) = match self.operation {
+            Operation::Probe {} => ("probe", vec![], None, None),
+            Operation::List { path, delete_scope } if !path.contains('\0') => {
+                ("list", vec![path], None, delete_scope)
+            }
             Operation::Read { path, destination }
                 if valid_text(&path) && valid_text(&destination) =>
             {
-                ("read", vec![path, destination])
+                ("read", vec![path, destination], None, None)
+            }
+            Operation::Stat { path, delete_scope } if !path.contains('\0') => {
+                ("stat", vec![path], None, delete_scope)
+            }
+            Operation::Mutate { request } => {
+                request.validate()?;
+                ("mutate", vec![], Some(request), None)
+            }
+            Operation::Reconcile { request } => {
+                request.validate()?;
+                ("reconcile", vec![], Some(request), None)
             }
             _ => return Err(Error::Input(INVALID)),
         };
+        if let Some(scope) = &delete_scope {
+            scope.validate_path(&paths[0])?;
+        }
         Ok((
             Args {
                 host: self.host,
@@ -77,6 +111,8 @@ impl Request {
                 length: None,
                 replace: false,
                 directory: false,
+                mutation,
+                delete_scope,
             },
             self.password,
         ))
@@ -113,7 +149,7 @@ mod tests {
     }
 
     #[test]
-    fn accepts_only_read_only_typed_operations() {
+    fn accepts_typed_read_operations_and_refuses_legacy_mutation_shapes() {
         let (args, _) = parse(request(json!({"type":"list","path":""}))).unwrap();
         assert_eq!(args.paths, [""]);
         assert!(parse(request(json!({"type":"probe"}))).is_ok());
@@ -125,6 +161,63 @@ mod tests {
             json!({"type":"read","path":"a","destination":""}),
         ] {
             assert!(parse(request(operation)).is_err());
+        }
+    }
+
+    #[test]
+    fn scoped_list_and_stat_keep_exact_selection_bytes_and_reject_scope_expansion() {
+        let scope = json!({"root_path":"cafe\u{301}",
+            "root":{"index_number":2,"created_filetime":3},
+            "parent":{"index_number":4,"created_filetime":5}});
+        for kind in ["list", "stat"] {
+            let (args, _) = parse(request(
+                json!({"type":kind,"path":"cafe\u{301}/file","delete_scope":scope}),
+            ))
+            .unwrap();
+            assert_eq!(
+                args.delete_scope.unwrap().root_path.as_bytes(),
+                "cafe\u{301}".as_bytes()
+            );
+            for path in ["café/file", "cafe\u{301}-sibling/file", ""] {
+                assert!(parse(request(
+                    json!({"type":kind,"path":path,"delete_scope":scope})
+                ))
+                .is_err());
+            }
+        }
+        assert!(parse(request(json!({"type":"probe","delete_scope":scope}))).is_err());
+        assert!(parse(request(json!({"type":"read","path":"cafe\u{301}/file", "destination":"/tmp/file", "delete_scope":scope}))).is_err());
+    }
+
+    #[test]
+    fn native_mutations_have_one_strict_versioned_and_redacted_shape() {
+        let intent = json!({"kind":"create_file","operation_id":"11111111-2222-4333-8444-555555555555",
+            "path":"cafe\u{301}/file","parent":{"index_number":9,"created_filetime":1},
+            "payload":{"source":"/tmp/payload","bytes":3,"sha256":"a".repeat(64)}});
+        for kind in ["mutate", "reconcile"] {
+            let (args, _) = parse(request(json!({"type":kind,"request":intent}))).unwrap();
+            assert_eq!(args.command, kind);
+            assert!(args.mutation.is_some());
+        }
+        assert!(parse(request(json!({"type":"stat","path":"café"}))).is_ok());
+        assert!(parse(request(json!({"type":"stat","path":""}))).is_ok());
+        let mut bad = intent.clone();
+        bad["receipt"] = json!({"arbitrary":"synthetic-sensitive-value"});
+        assert_eq!(
+            parse(request(json!({"type":"mutate","request":bad})))
+                .err()
+                .unwrap()
+                .to_string(),
+            Error::Input(INVALID).to_string()
+        );
+        for (field, value) in [
+            ("operation_id", json!("../escape")),
+            ("kind", json!("overwrite")),
+            ("destination", json!("unexpected")),
+        ] {
+            let mut bad = intent.clone();
+            bad[field] = value;
+            assert!(parse(request(json!({"type":"mutate","request":bad}))).is_err());
         }
     }
 

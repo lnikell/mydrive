@@ -44,6 +44,8 @@ struct Args {
     length: Option<u64>,
     replace: bool,
     directory: bool,
+    mutation: Option<nas_transport::mutation::MutationRequest>,
+    delete_scope: Option<nas_transport::mutation::DeleteScope>,
 }
 
 impl Args {
@@ -61,6 +63,8 @@ impl Args {
             length: None,
             replace: false,
             directory: false,
+            mutation: None,
+            delete_scope: None,
         };
         let mut stdin = false;
         while let Some(arg) = input.next() {
@@ -209,15 +213,28 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
     };
     let result = match args.command.as_str() {
         "probe" => Ok(json!({})),
+        "stat" => nas
+            .stat_scoped(&args.paths[0], args.delete_scope.as_ref(), &cancelled)
+            .await
+            .map(|entry| json!({"entry":entry})),
+        "mutate" | "reconcile" => nas
+            .mutate(
+                args.mutation.as_ref().expect("typed native mutation"),
+                args.command == "reconcile",
+                &cancelled,
+                progress,
+            )
+            .await
+            .map(|result| json!(result)),
         "list" => {
             let mut pages = 0;
-            nas.list(args.paths.first().map_or("", String::as_str), args.pages, &cancelled, |entries| {
+            nas.list_scoped(args.paths.first().map_or("", String::as_str), args.pages, args.delete_scope.as_ref(), &cancelled, |entries| {
                 for entries in entries.chunks(1000) {
                     pages += 1;
                     emit(json!({"type":"page","number":pages,"elapsed_ms":operation.elapsed().as_millis(),"entries":entries}))?;
                 }
                 Ok(())
-            }).await.map(|(entries, complete)| json!({"entries":entries,"pages":pages,"complete":complete}))
+            }).await.map(|listing| json!({"entries":listing.entries,"pages":pages,"complete":listing.complete,"entry":listing.entry}))
         }
         "read" => nas
             .download(
@@ -254,7 +271,11 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
     };
     let cleanup = nas.disconnect().await;
     let data = result?;
-    cleanup?;
+    // A failed logoff cannot erase a verified mutation outcome or its recovery
+    // receipts. Mutation handles already invalidate their connection on loss.
+    if args.mutation.is_none() {
+        cleanup?;
+    }
     emit(json!({"type":"complete","operation_ms":operation.elapsed().as_millis(),"result":data}))
 }
 
