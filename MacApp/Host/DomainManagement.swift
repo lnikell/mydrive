@@ -160,16 +160,18 @@ struct ConnectionRemoval {
         }
         // OS removal has already succeeded. Cleanup failures must never hide
         // the URL of pending local work that macOS chose to preserve.
+        let store = Result { try AppStorage.connectionStore() }
+        if let preserved {
+            do { try store.get().retainedWorkLocations.record(preserved, domainID: settings.domainID) }
+            catch { failures.append("Retained-work shortcut could not be saved: \(error.localizedDescription)") }
+        }
+        // The exported-work receipt reaches its file/directory durability
+        // barriers before any subsequent credential or storage cleanup begins.
         do { try CredentialStore.remove(for: settings) }
         catch { failures.append("Saved credentials: \(error.localizedDescription)") }
         var recovery: [URL] = []
         do {
-            let store = try AppStorage.connectionStore()
-            if let preserved {
-                do { try store.retainedWorkLocations.record(preserved, domainID: settings.domainID) }
-                catch { failures.append("Retained-work shortcut could not be saved: \(error.localizedDescription)") }
-            }
-            let folder = try store.folder(for: settings.domainID)
+            let folder = try store.get().folder(for: settings.domainID)
             do {
                 if let retained = try await ConnectionRemovalStorage.clean(folder: folder, preserving: preserved) {
                     recovery.append(retained)

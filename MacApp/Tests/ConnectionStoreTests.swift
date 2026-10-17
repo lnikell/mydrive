@@ -94,6 +94,23 @@ private func rejects(_ operation: () throws -> Void) throws {
         try require(afterExportRestart.retainedFolders.filter { $0 == exported }.count == 1,
                     "An external OS export shortcut disappeared or duplicated after restart")
         let receipts = root.appendingPathComponent("RetainedWork", isDirectory: true)
+        let secondExport = temporary.appendingPathComponent("Second OS preserved work", isDirectory: true)
+        try store.retainedWorkLocations.record(secondExport, domainID: a.id)
+        let receiptA = receipts.appendingPathComponent(a.id + ".json")
+        let committedReceipt = try Data(contentsOf: receiptA)
+        let savedExports = try RetainedWorkLocations(root: receipts).load().urls
+        try require(Set(savedExports) == [exported, secondExport], "Receipt replacement lost a previous exported location")
+        let permissions = try FileManager.default.attributesOfItem(atPath: receiptA.path)[.posixPermissions] as? NSNumber
+        try require(permissions?.uint16Value == 0o600, "Exported-work receipt was not created privately")
+        try require(try !DirectoryContents.contains(in: receipts) { $0.hasSuffix(".tmp") }, "A successful receipt write leaked its temporary file")
+        do {
+            try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: receipts.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: receipts.path) }
+            try rejects { try store.retainedWorkLocations.record(temporary.appendingPathComponent("Uncommitted export"), domainID: a.id) }
+            try require(try Data(contentsOf: receiptA) == committedReceipt, "Failed receipt replacement changed previously retained locations")
+        }
+        try require(try !DirectoryContents.contains(in: receipts) { $0.hasSuffix(".tmp") }, "A failed receipt write leaked its temporary file")
+        print("PASS private receipt replacement survives reopen and a write failure preserves its committed predecessor")
         let corruptReceipt = receipts.appendingPathComponent(b.id + ".json")
         try FileManager.default.createSymbolicLink(at: corruptReceipt, withDestinationURL: retained)
         try require(try store.load().issues.contains { $0.id == "retained-" + b.id + ".json" },

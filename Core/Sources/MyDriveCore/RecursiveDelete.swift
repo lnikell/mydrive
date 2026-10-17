@@ -1,6 +1,17 @@
 import Foundation
 
 extension Catalog {
+    /// Selects an existing deletion scope before native code qualifies a fresh
+    /// request. This never creates/freezes an inventory or requires a live root.
+    /// Nil and unknown contexts reuse the earliest scope; only an issued context
+    /// newer than every prior fence can authorize another inventory.
+    public func recursiveDeleteStatus(rootID: String, contextID: UUID?) throws -> RecursiveDeleteStatus? {
+        try database.transaction(write: false) {
+            let epoch = try deleteContextEpoch(contextID?.uuidString.lowercased())
+            return try priorRecursiveDelete(rootID: rootID, contextEpoch: epoch)
+        }
+    }
+
     /// Starts or resumes the original immutable scope. An unknown/nil/old OS
     /// context can never expand an earlier inventory. Only a later issued native
     /// domain version authorizes another inventory for the same Finder root.

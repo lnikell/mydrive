@@ -13,19 +13,26 @@ struct RetainedWorkLocations {
 
     func record(_ url: URL, domainID: String) throws {
         guard ConnectionSettings.validDomainID(domainID), Self.valid(url) else { throw CocoaError(.fileWriteInvalidFileName) }
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        var info = stat()
-        guard lstat(root.path, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { throw CocoaError(.fileWriteNoPermission) }
+        let parent = open(root.deletingLastPathComponent().path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard parent >= 0 else { throw Self.failure() }
+        defer { close(parent) }
+        let name = root.lastPathComponent
+        if mkdirat(parent, name, 0o700) != 0, errno != EEXIST { throw Self.failure() }
+        let directory = openat(parent, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directory >= 0 else { throw Self.failure() }
+        defer { close(directory) }
+        // The first receipt creates this directory too. Persist that parent
+        // entry before returning a durable location for exported user work.
+        guard fsync(parent) == 0 else { throw Self.failure() }
         let file = root.appendingPathComponent(domainID + ".json")
         var receipt: Receipt
-        do { receipt = try read(file, domainID: domainID) }
+        do { receipt = try read(file, domainID: domainID, directory: directory) }
         catch let error as POSIXError where error.code == .ENOENT { receipt = Receipt(domainID: domainID, urls: []) }
         if !receipt.urls.contains(url) { receipt.urls.append(url) }
         guard receipt.urls.count <= 128 else { throw CocoaError(.fileWriteOutOfSpace) }
         let bytes = try JSONEncoder().encode(receipt)
         guard bytes.count <= limit else { throw CocoaError(.fileWriteOutOfSpace) }
-        try bytes.write(to: file, options: [.atomic])
-        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        try write(bytes, name: file.lastPathComponent, directory: directory)
     }
 
     func load() throws -> (urls: [URL], issues: [ConnectionLoadIssue]) {
@@ -51,8 +58,9 @@ struct RetainedWorkLocations {
         return (urls, issues)
     }
 
-    private func read(_ url: URL, domainID: String) throws -> Receipt {
-        let descriptor = open(url.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+    private func read(_ url: URL, domainID: String, directory: Int32? = nil) throws -> Receipt {
+        let flags = O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC
+        let descriptor = directory.map { openat($0, url.lastPathComponent, flags) } ?? open(url.path, flags)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         let input = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
         defer { try? input.close() }
@@ -67,6 +75,22 @@ struct RetainedWorkLocations {
         }
         return receipt
     }
+
+    private func write(_ data: Data, name: String, directory: Int32) throws {
+        let temporary = "." + UUID().uuidString.lowercased() + ".tmp"
+        let descriptor = openat(directory, temporary, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard descriptor >= 0 else { throw Self.failure() }
+        defer { _ = unlinkat(directory, temporary, 0) }
+        let output = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? output.close() }
+        try output.write(contentsOf: data)
+        try output.synchronize()
+        try output.close()
+        guard renameat(directory, temporary, directory, name) == 0 else { throw Self.failure() }
+        guard fsync(directory) == 0 else { throw Self.failure() }
+    }
+
+    private static func failure() -> POSIXError { POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
 
     private static func valid(_ url: URL) -> Bool {
         url.isFileURL && (url.host == nil || url.host == "" || url.host == "localhost")

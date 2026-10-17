@@ -22,6 +22,9 @@ import Testing
             advancingDomainVersion: .init(expectedEpoch: 0, nextArchive: clockData(9)))
         #expect(duplicate.domainVersionState?.epoch == 1)
         try await publish([file("first", 2), file("new", 3)], parent: root.id, in: catalog)
+        // A genuinely later issued context has no prior compatible scope. The
+        // native driver must qualify its OS base before preparing a new one.
+        #expect(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: v1.contextID) == nil)
         let second = try await catalog.prepareRecursiveDelete(intent: recursiveIntent(root, context: v1),
             rootParentIdentity: parentIdentity, requestContext: clockData(43))
         #expect(second.key != first.key)
@@ -38,6 +41,10 @@ import Testing
             sourcePath: "tree", baseEntry: root.entry, deletionContextID: mutationUUID().uuidString.lowercased())
         #expect(try await catalog.prepareRecursiveDelete(intent: unknown, rootParentIdentity: parentIdentity).key == first.key)
         #expect(try await catalog.prepareRecursiveDelete(intent: recursiveIntent(root, context: v1), rootParentIdentity: parentIdentity).key == second.key)
+        #expect(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: nil)?.key == first.key)
+        #expect(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: mutationUUID())?.key == first.key)
+        #expect(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: v0.contextID)?.key == first.key)
+        #expect(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: v1.contextID)?.key == second.key)
         let db = try SQLiteConnection(url: f.url, cacheKiB: 2_048)
         #expect(try db.scalarInt("SELECT total_nodes FROM recursive_deletes WHERE operation_key = ?", [.text(first.key.uuidString)]) == 2)
         #expect(try db.scalarInt("SELECT total_nodes FROM recursive_deletes WHERE operation_key = ?", [.text(second.key.uuidString)]) == 3)
@@ -45,6 +52,37 @@ import Testing
         #expect(reopened.initialDomainVersionState == v1)
         #expect(try await reopened.domainVersionState(epoch: 0) == v0)
         #expect(try await reopened.domainVersionState(epoch: 2) == nil)
+        #expect(try await reopened.recursiveDeleteStatus(rootID: root.id, contextID: nil)?.key == first.key)
+        #expect(try await reopened.recursiveDeleteStatus(rootID: root.id, contextID: v1.contextID)?.key == second.key)
+    }
+
+    @Test func priorScopeLookupDoesNotFreezeInventoryOrRequireALiveRoot() async throws {
+        let f = try Fixture()
+        let catalog = try Catalog(databaseURL: f.url, initialDomainVersionArchive: clockData(0))
+        let root = try await seed(catalog)
+        let version = try #require(catalog.initialDomainVersionState)
+        #expect(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: version.contextID) == nil)
+        let status = try await catalog.prepareRecursiveDelete(intent: recursiveIntent(root, context: version),
+            rootParentIdentity: parentIdentity)
+        let scan = try await catalog.beginScan(of: root.id)
+        _ = try await catalog.captureDeleteDirectory(key: status.key, scan: scan, directory: root.entry)
+        // All directories are captured, but selecting a prior scope is a read,
+        // unlike nextRecursiveDeleteWork, which would advance it to frozen.
+        let generation = try await catalog.generation()
+        let anchor = try await catalog.currentChangeAnchor()
+        let selected = try #require(try await catalog.recursiveDeleteStatus(rootID: root.id, contextID: nil))
+        #expect(selected.key == status.key && selected.phase == .building)
+        #expect(try await catalog.generation() == generation)
+        #expect(try await catalog.currentChangeAnchor() == anchor)
+        #expect(try await catalog.domainVersionState() == version)
+        let db = try SQLiteConnection(url: f.url, cacheKiB: 2_048)
+        #expect(try db.scalarInt("SELECT count(*) FROM recursive_deletes") == 1)
+        #expect(try db.scalarInt("SELECT count(*) FROM operations") == 1)
+        try await publish([], parent: Catalog.rootID, in: catalog)
+        #expect(try await catalog.item(id: root.id)?.isDeleted == true)
+        let reopened = try Catalog(databaseURL: f.url)
+        let recovered = try #require(try await reopened.recursiveDeleteStatus(rootID: root.id, contextID: version.contextID))
+        #expect(recovered.key == status.key && recovered.phase == .building)
     }
 
     @Test func exactUnicodeScopeAndChildBindingRejectCanonicalEquivalentPaths() async throws {
