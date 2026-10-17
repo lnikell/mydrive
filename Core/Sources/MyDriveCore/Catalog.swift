@@ -24,6 +24,23 @@ public actor Catalog {
         }
     }
 
+    /// Exact byte spelling is resolved by SQLite's binary name index. This is
+    /// independent of listing cursors and never scans all siblings to find one.
+    public func child(named name: String, in parentID: String) throws -> CatalogItem? {
+        try Self.validateName(name)
+        try requireDirectory(parentID)
+        return try database.statement("""
+            SELECT \(Self.itemColumns) FROM items
+            WHERE parent_id = ? AND is_deleted = 0 AND name = ? COLLATE BINARY
+            ORDER BY id LIMIT 2
+            """, [.text(parentID), .text(name)]) { statement in
+                guard try statement.step() else { return nil }
+                let result = try Self.decodeItem(statement)
+                guard try !statement.step() else { throw CatalogError.invalidEntry }
+                return result
+            }
+    }
+
     public func generation() throws -> Int64 {
         try database.scalarInt("SELECT generation FROM catalog_state WHERE singleton = 1")
     }
