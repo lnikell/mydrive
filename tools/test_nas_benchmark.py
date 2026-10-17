@@ -4,8 +4,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import tempfile
+import time
 import unittest
+from unittest.mock import patch
 from test_nas_test_config import PUBLIC_TARGET
 
 spec = importlib.util.spec_from_file_location("nas_benchmark", Path(__file__).with_name("nas_benchmark.py"))
@@ -150,6 +153,51 @@ class BenchmarkTests(unittest.TestCase):
         self.assertEqual(len(frames.pending), benchmark.FRAME_BYTES)
         with self.assertRaisesRegex(benchmark.BenchmarkError, "inside"):
             self.finish_partial()
+
+    def test_full_native_input_pipe_still_has_deadline_and_reaps_child(self):
+        self.helper.write_text("""#!/usr/bin/env python3
+import signal, time
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+# Never consume stdin or produce stdout.
+time.sleep(999)
+""")
+        report = {"operations": []}
+        root = ".mydrive-transport-tests/mutations-123456781234423482341234567890ab"
+        helper = benchmark.Helper(self.helper, b"not-a-real-password", root,
+                                  report, lambda: None, 0.2, target=PUBLIC_TARGET)
+        def watchdog(_signal, _frame):
+            raise RuntimeError("native input blocked outside its operation deadline")
+        previous = signal.signal(signal.SIGALRM, watchdog)
+        started = time.monotonic()
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 8)
+            with self.assertRaisesRegex(benchmark.BenchmarkError, "deadline"):
+                helper.run_request({"type": "stat", "path": root + "/" + "x" * 60000})
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertLess(time.monotonic() - started, 6)
+        pid = report["operations"][0]["pid"]
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+        with self.assertRaises(ChildProcessError):
+            os.waitpid(pid, os.WNOHANG)
+
+    def test_native_operation_ledger_snapshots_nested_receipts_without_password(self):
+        root = ".mydrive-transport-tests/mutations-123456781234423482341234567890ab"
+        helper = benchmark.Helper(self.helper, b"not-a-real-password", root,
+                                  {"operations": []}, lambda: None, target=PUBLIC_TARGET)
+        operation = {"type": "mutate", "request": {"kind": "create_file", "path": root + "/file",
+                     "operation_id": "12345678-1234-4234-8234-1234567890ab", "receipt": {}}}
+        records = []
+        def capture(_args, _input, record, _expect_error):
+            records.append(record)
+        with patch.object(helper, "_execute", side_effect=capture):
+            helper.run_request(operation)
+        operation["request"]["receipt"]["staged"] = {"path": root + "/later"}
+        self.assertEqual(records[0]["operation"]["request"]["receipt"], {})
+        self.assertNotIn("not-a-real-password", json.dumps(records))
 
     @staticmethod
     def finish_partial():

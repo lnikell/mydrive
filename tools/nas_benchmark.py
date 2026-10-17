@@ -6,6 +6,7 @@ Every helper is measured with wait4: peak RSS belongs to that individual native
 process, not a subtraction of cumulative RUSAGE_CHILDREN high-water marks.
 """
 import argparse
+import copy
 import datetime
 import getpass
 import hashlib
@@ -13,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import selectors
 import signal
 import subprocess
@@ -126,6 +128,48 @@ class Helper:
             args.extend(["--" + key, value])
         args.extend(["--password-stdin", "--test-root", self.root, command, *map(str, arguments)])
         record = {"command": command, "arguments": list(map(str, arguments))}
+        return self._execute(args, self.password, record, expect_error)
+
+    def run_request(self, operation, *, expect_error=None):
+        """Native mutation trials cannot escape their fresh generated namespace."""
+        operation = copy.deepcopy(operation)
+        if re.fullmatch(r"\.mydrive-transport-tests/mutations-[0-9a-f]{32}", self.root) is None:
+            raise BenchmarkError("native mutation checks require a generated mutation-trial root")
+        if not isinstance(operation, dict) or operation.get("type") not in ("stat", "mutate", "reconcile"):
+            raise BenchmarkError("unsupported native trial operation")
+        if operation["type"] == "stat":
+            if set(operation) != {"type", "path"}:
+                raise BenchmarkError("malformed native stat request")
+            paths = [operation["path"]]
+        else:
+            if set(operation) != {"type", "request"} or not isinstance(operation["request"], dict):
+                raise BenchmarkError("malformed native mutation request")
+            mutation = operation["request"]
+            if set(mutation) - {"operation_id", "kind", "path", "destination", "expected", "payload", "receipt"}:
+                raise BenchmarkError("unexpected native mutation fields")
+            paths = [mutation.get("path")]
+            if mutation.get("destination") is not None:
+                paths.append(mutation["destination"])
+            receipt = mutation.get("receipt", {})
+            if not isinstance(receipt, dict) or set(receipt) - {"staged", "archived"}:
+                raise BenchmarkError("malformed mutation receipt")
+            for artifact in receipt.values():
+                if artifact is not None:
+                    if not isinstance(artifact, dict):
+                        raise BenchmarkError("malformed mutation artifact")
+                    paths.append(artifact.get("path"))
+        if any(not isinstance(path, str) or not path.startswith(self.root + "/")
+               or any(part in ("", ".", "..") for part in path.split("/"))
+               or "\\" in path or "\0" in path for path in paths):
+            raise BenchmarkError("native trial operation is outside its generated namespace")
+        request = {"version": 1, **self.target, "password": self.password.decode("utf-8"), "operation": operation}
+        data = json.dumps(request, ensure_ascii=False).encode()
+        if len(data) > 65_536:
+            raise BenchmarkError("native request exceeds its input limit")
+        return self._execute([str(self.binary), "--request-stdin"], data,
+                             {"command": operation["type"], "operation": operation}, expect_error)
+
+    def _execute(self, args, input_bytes, record, expect_error):
         self.report["operations"].append(record)
         self.save()
         events = Events()
@@ -136,18 +180,34 @@ class Helper:
         record["pid"] = process.pid
         reaped = False
         try:
-            try:
-                process.stdin.write(self.password)
-                process.stdin.close()
-            except BrokenPipeError:
-                pass
             with selectors.DefaultSelector() as selector:
                 selector.register(process.stdout, selectors.EVENT_READ)
+                # A native JSON request can exceed the pipe's capacity. Drive
+                # both directions under the same deadline; a child that never
+                # reads stdin must not trap us in a blocking BufferedWriter.
+                os.set_blocking(process.stdin.fileno(), False)
+                pending = memoryview(input_bytes)
+                if pending:
+                    selector.register(process.stdin, selectors.EVENT_WRITE)
+                else:
+                    process.stdin.close()
                 eof = False
                 while not (eof and reaped):
                     if time.perf_counter() - started > self.timeout:
                         raise BenchmarkError("helper exceeded its operation deadline")
                     for key, _ in selector.select(0.1):
+                        if key.fileobj is process.stdin:
+                            try:
+                                written = os.write(key.fd, pending[:65536])
+                                pending = pending[written:]
+                            except BlockingIOError:
+                                continue
+                            except BrokenPipeError:
+                                pending = pending[len(pending):]
+                            if not pending:
+                                selector.unregister(process.stdin)
+                                process.stdin.close()
+                            continue
                         data = os.read(key.fd, 65536)
                         if data:
                             frames.feed(data)
