@@ -2,12 +2,18 @@ import Foundation
 import FileProvider
 
 @objc(FileProviderExtension)
-final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, NSFileProviderServicing, NSFileProviderCustomAction, @unchecked Sendable {
+final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, NSFileProviderServicing, NSFileProviderCustomAction, NSFileProviderDomainState, @unchecked Sendable {
     private let coordinator: Result<DomainCoordinator, Error>
     private let control: Result<DomainControlService, Error>
     private let tasks = ProviderTasks()
     private let lifecycleLock = NSLock()
     private var invalidated = false
+
+    var domainVersion: NSFileProviderDomainVersion {
+        (try? coordinator.get())?.domainVersionSnapshot.domainVersion ?? DomainVersionSnapshot.unavailable.domainVersion
+    }
+
+    var userInfo: [AnyHashable: Any] { [:] }
 
     required init(domain: NSFileProviderDomain) {
         let coordinator = Result {
@@ -68,7 +74,7 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
     func enumerator(
         for containerItemIdentifier: NSFileProviderItemIdentifier, request: NSFileProviderRequest
     ) throws -> any NSFileProviderEnumerator {
-        if containerItemIdentifier == .trashContainer { throw ProviderErrors.noSuchItem() }
+        if containerItemIdentifier == .trashContainer { throw CocoaError(.featureUnsupported) }
         return try CatalogEnumerator(identifier: containerItemIdentifier, coordinator: coordinator.get())
     }
 
@@ -108,15 +114,27 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         }
     }
 
-    // The alpha supports genuine NAS reads. It never acknowledges an attempted
-    // write as uploaded, including changes initiated outside Finder's UI.
     func createItem(
         basedOn itemTemplate: any NSFileProviderItem, fields: NSFileProviderItemFields,
         contents: URL?, options: NSFileProviderCreateItemOptions, request: NSFileProviderRequest,
         completionHandler: @escaping ((any NSFileProviderItem)?, NSFileProviderItemFields, Bool, (any Error)?) -> Void
     ) -> Progress {
-        completionHandler(nil, fields, false, ProviderErrors.readOnly())
-        return Progress(totalUnitCount: 0)
+        #if MYDRIVE_DEVELOPMENT
+        DevelopmentPayloadShape.observe(contents, contentType: itemTemplate.contentType?.identifier ?? "unknown",
+            operation: "create", fields: fields.rawValue, options: options.rawValue)
+        #endif
+        let input = Result { try MutationInput(item: itemTemplate, fields: fields, contents: contents,
+                                               allowDirectoryContents: true) }
+        let callback = ProviderCallback(completionHandler)
+        return tasks.run { [coordinator] progress in
+            do {
+                let input = try input.get()
+                let item = try await coordinator.get().write(input, create: true, progress: progress)
+                callback.value(item, input.pendingFields, false, nil)
+            } catch {
+                callback.value(nil, [], false, ProviderErrors.translate(error))
+            }
+        }
     }
 
     func modifyItem(
@@ -125,8 +143,21 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         request: NSFileProviderRequest,
         completionHandler: @escaping ((any NSFileProviderItem)?, NSFileProviderItemFields, Bool, (any Error)?) -> Void
     ) -> Progress {
-        completionHandler(nil, changedFields, false, ProviderErrors.readOnly())
-        return Progress(totalUnitCount: 0)
+        #if MYDRIVE_DEVELOPMENT
+        DevelopmentPayloadShape.observe(contents, contentType: item.contentType?.identifier ?? "unknown",
+            operation: "modify", fields: changedFields.rawValue, options: options.rawValue)
+        #endif
+        let input = Result { try MutationInput(item: item, fields: changedFields, contents: contents, baseVersion: baseVersion) }
+        let callback = ProviderCallback(completionHandler)
+        return tasks.run { [coordinator] progress in
+            do {
+                let input = try input.get()
+                let item = try await coordinator.get().write(input, create: false, progress: progress)
+                callback.value(item, input.pendingFields, false, nil)
+            } catch {
+                callback.value(nil, [], false, ProviderErrors.translate(error))
+            }
+        }
     }
 
     func deleteItem(
@@ -134,7 +165,20 @@ final class FileProviderExtension: NSObject, NSFileProviderReplicatedExtension, 
         options: NSFileProviderDeleteItemOptions, request: NSFileProviderRequest,
         completionHandler: @escaping ((any Error)?) -> Void
     ) -> Progress {
-        completionHandler(ProviderErrors.readOnly())
-        return Progress(totalUnitCount: 0)
+        let id = ProviderItem.catalogID(identifier)
+        let content = baseVersion.contentVersion
+        let metadata = baseVersion.metadataVersion
+        let requestArchive = Result { try DomainVersionSnapshot.archive(request.domainVersion) }
+        let recursive = options.contains(.recursive)
+        let callback = ProviderCallback(completionHandler)
+        return tasks.run { [coordinator] progress in
+            do {
+                let owner = try coordinator.get()
+                let context = try await owner.deletionRequestContext(archive: requestArchive.get(), recursive: recursive)
+                try await owner.delete(id: id, contentVersion: content,
+                                       metadataVersion: metadata, requestContext: context, progress: progress)
+                callback.value(nil)
+            } catch { callback.value(ProviderErrors.translate(error)) }
+        }
     }
 }

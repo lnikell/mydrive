@@ -60,23 +60,26 @@ final class CatalogEnumerator: NSObject, NSFileProviderEnumerator, @unchecked Se
     func currentSyncAnchor(completionHandler: @escaping (NSFileProviderSyncAnchor?) -> Void) {
         let callback = ProviderCallback(completionHandler)
         _ = tasks.run { [coordinator] _ in
-            let generation = try? await coordinator.generation()
-            callback.value(generation.map(Self.anchor))
+            let sequence = try? await coordinator.currentChangeAnchor()
+            callback.value(sequence.map(CatalogChangeAnchor.encode))
         }
     }
 
     func enumerateChanges(for observer: any NSFileProviderChangeObserver, from anchor: NSFileProviderSyncAnchor) {
         let callback = ProviderCallback(observer)
-        _ = tasks.run { [coordinator] _ in
+        let size = min(128, max(1, observer.suggestedBatchSize ?? 128))
+        _ = tasks.run { [coordinator, identifier] _ in
             do {
-                let current = Self.anchor(try await coordinator.generation())
-                guard anchor == current else {
-                    // The alpha has a durable catalog generation, but not a
-                    // retained per-item change log. Request a full enumeration
-                    // rather than fabricate an incomplete set of deletions.
-                    throw NSFileProviderError(.syncAnchorExpired)
+                let sequence = try CatalogChangeAnchor.decode(anchor)
+                let page = try await coordinator.changes(since: sequence, for: identifier, limit: size)
+                let items = try await coordinator.providerItems(page.updated)
+                try Task.checkCancellation()
+                if !items.isEmpty { callback.value.didUpdate(items) }
+                if !page.deletedIDs.isEmpty {
+                    callback.value.didDeleteItems(withIdentifiers: page.deletedIDs.map(ProviderItem.identifier))
                 }
-                callback.value.finishEnumeratingChanges(upTo: current, moreComing: false)
+                callback.value.finishEnumeratingChanges(
+                    upTo: CatalogChangeAnchor.encode(page.anchor), moreComing: page.moreComing)
             } catch {
                 callback.value.finishEnumeratingWithError(ProviderErrors.translate(error))
             }
@@ -151,7 +154,4 @@ final class CatalogEnumerator: NSObject, NSFileProviderEnumerator, @unchecked Se
             page.rawValue == NSFileProviderPage.initialPageSortedByDate as Data
     }
 
-    private static func anchor(_ generation: Int64) -> NSFileProviderSyncAnchor {
-        NSFileProviderSyncAnchor(Data("catalog-v1:\(generation)".utf8))
-    }
 }

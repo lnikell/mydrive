@@ -12,14 +12,20 @@ struct EvictionReport: Sendable {
 /// and asks File Provider to enumerate; it does not run a second NAS mirror.
 actor DomainCoordinator {
     let catalog: Catalog
+    nonisolated let domainVersionSnapshot: DomainVersionSnapshot
     private let settings: ConnectionSettings
     private let manager: NSFileProviderManager
     private let ownership: DomainOwnerLease
+    private let operationGate = DomainOperationGate()
+    private let catalogPublication = CatalogPublication()
+    private let mutationStaging: MutationStaging
     private var refreshes: [String: Task<Void, Error>] = [:]
     private var reconciliation: Task<Void, Error>?
     private var refreshRetry = RefreshRetryDelay()
     private var invalidated = false
     private var changingOfflinePolicy = false
+    private var maintenanceCursor: UUID?
+    private var mutationMaintenance = MutationMaintenanceReport()
     #if MYDRIVE_DEVELOPMENT
     private let developmentCredential = DevelopmentCredentialSession()
     private var installingDevelopmentCredential = false
@@ -29,7 +35,12 @@ actor DomainCoordinator {
         settings = try AppStorage.settings(for: identifier)
         let catalogURL = try AppStorage.catalogURL(for: identifier)
         ownership = try DomainOwnerLease(at: catalogURL.appendingPathExtension("owner"))
-        catalog = try Catalog(databaseURL: catalogURL)
+        let openedCatalog = try Catalog(databaseURL: catalogURL,
+            initialDomainVersionArchive: DomainVersionSnapshot.initialArchive())
+        catalog = openedCatalog
+        guard let initialVersion = openedCatalog.initialDomainVersionState else { throw CocoaError(.fileReadCorruptFile) }
+        domainVersionSnapshot = try DomainVersionSnapshot(initialVersion)
+        mutationStaging = try MutationStaging(root: catalogURL.deletingLastPathComponent().appendingPathComponent("Mutations", isDirectory: true))
         let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(identifier), displayName: displayName)
         guard let manager = NSFileProviderManager(for: domain) else {
             throw NSFileProviderError(.providerNotFound)
@@ -40,6 +51,7 @@ actor DomainCoordinator {
     func invalidate() async {
         guard !invalidated else { return }
         invalidated = true
+        await operationGate.close()
         #if MYDRIVE_DEVELOPMENT
         await developmentCredential.invalidate()
         #endif
@@ -125,6 +137,7 @@ actor DomainCoordinator {
     }
 
     private func performKnownDirectoryRefresh() async throws {
+        try await operationGate.perform { try await self.performMutationMaintenance() }
         try await refreshDirectory(parentID: Catalog.rootID)
         var afterID: String?
         while true {
@@ -137,6 +150,17 @@ actor DomainCoordinator {
             afterID = last.id
         }
     }
+
+    private func performMutationMaintenance() async throws {
+        try checkActive()
+        let report = await mutationAdapter().maintain(after: maintenanceCursor)
+        maintenanceCursor = report.nextCursor
+        mutationMaintenance = report
+    }
+
+    /// Counts describe the last bounded maintenance page, not a whole-domain
+    /// inventory. Recovery records remain durable independently of this sample.
+    func mutationRecoveryStatus() -> MutationMaintenanceReport { mutationMaintenance }
 
     func item(id: String) async throws -> ProviderItem {
         try checkActive()
@@ -176,6 +200,24 @@ actor DomainCoordinator {
         return try await catalog.generation()
     }
 
+    func currentChangeAnchor() async throws -> Int64 {
+        try checkActive()
+        return try await catalog.currentChangeAnchor()
+    }
+
+    func changes(since anchor: Int64, for identifier: NSFileProviderItemIdentifier, limit: Int = 128) async throws -> CatalogChangePage {
+        try checkActive()
+        if identifier == .workingSet { return try await catalog.changes(since: anchor, limit: limit) }
+        let id = ProviderItem.catalogID(identifier)
+        // Keep deleted documents scoped to their own identity as well. Looking
+        // only at live items would turn their final notification into an error.
+        let model = try await catalog.item(id: id)
+        if id == Catalog.rootID || model?.entry.kind == .directory {
+            return try await catalog.changes(since: anchor, in: id, limit: limit)
+        }
+        return try await catalog.changes(since: anchor, itemID: id, limit: limit)
+    }
+
     func knownItems(afterID: String?, limit: Int) async throws -> [CatalogItem] {
         try checkActive()
         return try await catalog.knownItems(afterID: afterID, limit: limit)
@@ -188,6 +230,7 @@ actor DomainCoordinator {
             throw CocoaError(.featureUnsupported)
         }
         if let version, version != original.itemVersion.contentVersion {
+            startRefresh(parentID: original.model.parentID ?? Catalog.rootID)
             throw NSFileProviderError(.versionNoLongerAvailable)
         }
 
@@ -218,8 +261,90 @@ actor DomainCoordinator {
             return (temporary, original)
         } catch {
             try? FileManager.default.removeItem(at: temporary)
+            await CatalogRefresh.recordFailure(error, in: catalog)
             throw error
         }
+    }
+
+    func write(_ input: MutationInput, create: Bool, progress: Progress) async throws -> ProviderItem {
+        try await operationGate.perform {
+            try await self.performWrite(input, create: create, progress: progress)
+        }
+    }
+
+    private func performWrite(_ input: MutationInput, create: Bool, progress: Progress) async throws -> ProviderItem {
+        try checkActive()
+        let result: CatalogItem
+        do { result = try await mutationAdapter().write(input, create: create, progress: progress) }
+        catch { await recordMutationFailure(error); throw error }
+        // Publication succeeded already. A failed notification must not turn a
+        // committed upload into a second remote write on the next callback.
+        await recordMutationPublication()
+        startRefresh(parentID: result.parentID ?? Catalog.rootID)
+        return try await providerItem(result)
+    }
+
+    func delete(id: String, contentVersion: Data, metadataVersion: Data,
+                requestContext: DeletionRequestContext? = nil, progress: Progress) async throws {
+        try await operationGate.perform {
+            try await self.performDelete(id: id, contentVersion: contentVersion,
+                                         metadataVersion: metadataVersion, requestContext: requestContext, progress: progress)
+        }
+    }
+
+    func deletionRequestContext(archive: Data?, recursive: Bool) async throws -> DeletionRequestContext {
+        try checkActive()
+        return try await domainVersionSnapshot.resolve(archive, recursive: recursive) { [catalog] epoch in
+            try await catalog.domainVersionState(epoch: epoch)
+        }
+    }
+
+    private func performDelete(id: String, contentVersion: Data, metadataVersion: Data,
+                               requestContext: DeletionRequestContext?, progress: Progress) async throws {
+        try checkActive()
+        do {
+            if let requestContext, requestContext.recursive,
+               let item = try await catalog.item(id: id), item.entry.kind == .directory {
+                let driver = ProviderRecursiveDelete(mutations: mutationAdapter(), versions: domainVersionSnapshot,
+                    published: { await self.recordMutationPublication() })
+                try await driver.delete(id: id, contentVersion: contentVersion, metadataVersion: metadataVersion,
+                                        context: requestContext, progress: progress)
+            } else {
+                try await mutationAdapter().delete(id: id, contentVersion: contentVersion,
+                                                   metadataVersion: metadataVersion, progress: progress)
+            }
+        } catch {
+            await recordMutationFailure(error)
+            let native = ProviderErrors.translate(error) as NSError
+            if native.domain == NSFileProviderErrorDomain,
+               [NSFileProviderError.deletionRejected.rawValue, NSFileProviderError.directoryNotEmpty.rawValue,
+                NSFileProviderError.cannotSynchronize.rawValue].contains(native.code),
+               let root = try? await catalog.item(id: id), let parent = root.parentID {
+                startRefresh(parentID: parent)
+            }
+            throw error
+        }
+        await recordMutationPublication()
+    }
+
+    private func mutationAdapter() -> ProviderMutations {
+        ProviderMutations(catalog: catalog, staging: mutationStaging,
+                          remote: MutationRemote(client: { try await self.operationClient() }),
+                          checkActive: { try await self.checkActive() })
+    }
+
+    private func recordMutationFailure(_ error: Error) async {
+        await CatalogRefresh.recordFailure(error, in: catalog)
+        if let failure = error as? MutationParentError,
+           let parent = try? await catalog.item(id: failure.parentID) {
+            // Parent metadata comes from its containing directory's listing.
+            startRefresh(parentID: parent.parentID ?? Catalog.rootID)
+        }
+    }
+
+    private func recordMutationPublication() async {
+        await catalogPublication.record(changed: true)
+        try? await catalogPublication.notify { try await self.notifyCatalogChanges() }
     }
 
     func keepDownloaded(_ identifiers: [String]) async throws {
@@ -346,6 +471,10 @@ actor DomainCoordinator {
     }
 
     private func performRefresh(parentID: String) async throws {
+        try await operationGate.perform { try await self.performRefreshLocked(parentID: parentID) }
+    }
+
+    private func performRefreshLocked(parentID: String) async throws {
         // Cached directory pages never await this path. While a retry waits,
         // refreshes[parentID] keeps repeated requests on the same owned task.
         try await refreshRetry.wait()
@@ -353,39 +482,33 @@ actor DomainCoordinator {
         guard let path = try await catalog.relativePath(id: parentID) else {
             throw ProviderErrors.noSuchItem()
         }
-        let previousGeneration = try await catalog.generation()
-        let scan = try await catalog.beginScan(of: parentID)
+        let refresh = CatalogRefresh(catalog: catalog, publication: catalogPublication, list: { path, page in
+            let client = try await self.operationClient()
+            return try await client.listDirectory(path: path, pageSize: 128, onPage: page).observation
+        }, resolve: { code in try await self.resolveConnectionError(code) },
+           notify: { try await self.notifyCatalogChanges() },
+           checkActive: { try await self.checkActive() })
         do {
-            let client = try await operationClient()
-            try await client.list(path: path, pageSize: 128) { [catalog] entries in
-                try Task.checkCancellation()
-                try await catalog.stage(entries, in: scan)
-            }
-            try checkActive()
-            let generation = try await catalog.completeScan(scan)
+            _ = try await refresh.run(parentID: parentID, path: path)
             refreshRetry.succeeded()
-            try await catalog.setConnectionState(.online)
-            if generation != previousGeneration {
-                try await manager.signalEnumerator(for: .workingSet)
-            }
         } catch {
-            try? await catalog.abandonScan(scan)
-            // Use the same classification macOS receives, including a locked
-            // development Keychain. Never retry a credential read in a loop.
-            if let failure = ProviderErrors.translate(error) as? NSFileProviderError {
-                switch failure.code {
-                case .notAuthenticated:
-                    refreshRetry.failed()
-                    try? await catalog.setConnectionState(.authenticationRequired)
-                case .serverUnreachable:
-                    refreshRetry.failed()
-                    try? await catalog.setConnectionState(.offline)
-                default:
-                    break
-                }
+            await recordMutationFailure(error)
+            if let failure = ProviderErrors.translate(error) as? NSFileProviderError,
+               failure.code == .notAuthenticated || failure.code == .serverUnreachable {
+                refreshRetry.failed()
             }
             throw error
         }
+    }
+
+    private func resolveConnectionError(_ code: NSFileProviderError.Code) async throws {
+        try checkActive()
+        try await manager.signalErrorResolved(NSFileProviderError(code))
+    }
+
+    private func notifyCatalogChanges() async throws {
+        try checkActive()
+        try await manager.signalEnumerator(for: .workingSet)
     }
 
     private func checkActive() throws {

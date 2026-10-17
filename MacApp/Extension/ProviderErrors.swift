@@ -9,6 +9,16 @@ enum ProviderErrors {
 
     static func translate(_ error: Error) -> Error {
         if error is CancellationError { return CocoaError(.userCancelled) }
+        if let error = error as? CapturedDeletionConflict { return MutationInput.unsupported(error.message) }
+        if let error = error as? MutationParentError {
+            switch error {
+            case .refreshRequired:
+                return CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey:
+                    "This NAS folder needs to finish refreshing before the change can be sent. Local changes are preserved."])
+            case .replaced:
+                return MutationInput.unsupported("This NAS folder's identity could not be verified. Local changes are preserved; refresh the folder before trying again.")
+            }
+        }
         if let error = error as? CredentialStoreError {
             switch error {
             case .loginKeychainLocked: return NSFileProviderError(.notAuthenticated)
@@ -24,9 +34,12 @@ enum ProviderErrors {
             case .itemMissing: return noSuchItem()
             case .diskFull: return CocoaError(.fileWriteOutOfSpace)
             case .changed: return NSFileProviderError(.versionNoLongerAvailable)
+            case .unsupportedFeature: return CocoaError(.featureUnsupported)
+            case .scopeChanged: return MutationInput.unsupported("The selected folder moved or was replaced. Remaining items and recovery records are preserved.")
             case .localFailure, .remoteFailure: break
             }
         }
+        if error is ChangeFeedError { return NSFileProviderError(.syncAnchorExpired) }
         if let error = error as? CatalogError {
             switch error {
             case .missingItem, .invalidParent: return noSuchItem()

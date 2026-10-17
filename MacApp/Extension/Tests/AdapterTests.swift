@@ -2,6 +2,7 @@ import Foundation
 import FileProvider
 import MyDriveCore
 import Darwin
+import UniformTypeIdentifiers
 
 private struct TestFailure: Error { let message: String }
 
@@ -63,6 +64,20 @@ private struct AdapterTests {
             try await Task.sleep(for: .seconds(30))
             return
         }
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--unavailable-package-types" {
+            try await MutationRepresentationTests.unavailableRegistry()
+            return
+        }
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--tree-intake-only" {
+            let checks = try await LocalTreeSnapshotTests.run()
+            print("PASS \(checks) local tree snapshot groups")
+            return
+        }
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--tree-import-only" {
+            let checks = try await TreeImportTests.run() + TreeLayoutTests.run() + TreeFrontierTests.run() + TreeWorkProgressTests.run()
+            print("PASS \(checks) tree import groups")
+            return
+        }
 
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -80,11 +95,28 @@ private struct AdapterTests {
         let item = ProviderItem(model, policy: .onDemand, displayName: "Test NAS")
         let rootItem = ProviderItem(root, policy: .keepAvailable, displayName: "Test NAS")
         try require(item.itemIdentifier.rawValue == model.id, "Stable catalog identity changed")
-        try require(!item.capabilities.contains(.allowsWriting), "Read-only alpha advertises writes")
-        try require(!item.fileSystemFlags.contains(.userWritable), "Read-only alpha gives writable permissions")
+        try require(item.capabilities.contains(.allowsWriting), "Regular NAS files do not advertise implemented writes")
+        try require(item.fileSystemFlags.contains(.userWritable), "Regular NAS files do not have writable local permissions")
         try require(rootItem.filename == "Test NAS" && rootItem.itemIdentifier == .rootContainer, "Root metadata is invalid")
         try require(rootItem.contentPolicy == .downloadEagerlyAndKeepDownloaded, "Root offline policy was lost")
         print("PASS immutable provider metadata and root offline policy")
+
+        let directoryScan = try await catalog.beginScan()
+        try await catalog.stage([
+            RemoteEntry(name: "Document.rtfd", kind: .directory, contentVersion: "package", metadataVersion: "package"),
+            RemoteEntry(name: "Folder.txt", kind: .directory, contentVersion: "folder", metadataVersion: "folder")
+        ], in: directoryScan)
+        try await catalog.completeScan(directoryScan)
+        guard let package = try await catalog.child(named: "Document.rtfd", in: Catalog.rootID),
+              let folder = try await catalog.child(named: "Folder.txt", in: Catalog.rootID) else {
+            throw TestFailure(message: "Package fixtures missing")
+        }
+        for directory in [package, folder] {
+            let native: any NSFileProviderItem = ProviderItem(directory, policy: .onDemand, displayName: "Test NAS")
+            try require(native.contentType == .folder,
+                        "NAS directory must expose the File Provider folder contract: \(directory.entry.name)")
+        }
+        print("PASS native directory contract for package and regular extensions")
 
         let locked = ProviderErrors.translate(CredentialStoreError.loginKeychainLocked) as NSError
         let unavailable = ProviderErrors.translate(SMBClientError.serverUnreachable) as NSError
@@ -209,9 +241,23 @@ private struct AdapterTests {
         print("PASS kernel releases owner lease after process death")
         var checkCount = 10
         checkCount += try ContentFetchProgressTests.run()
+        checkCount += try CatalogChangeTests.run()
+        checkCount += try await CatalogRefreshTests.run()
+        checkCount += try await DomainVersionTests.run()
+        checkCount += try await DomainOperationGateTests.run()
+        checkCount += try await MutationTests.run()
+        checkCount += try await MutationRecoveryTests.run()
+        checkCount += try await MutationRepresentationTests.run()
+        checkCount += try await LocalTreeSnapshotTests.run()
+        checkCount += try await TreeImportTests.run()
+        checkCount += try await TreeLayoutTests.run()
+        checkCount += try await TreeFrontierTests.run()
+        checkCount += try TreeWorkProgressTests.run()
+        checkCount += try await RecursiveDeleteTests.run()
         checkCount += try await ProviderActionTests.run()
         checkCount += try await PolicyAwareEvictionTests.run()
         #if MYDRIVE_DEVELOPMENT
+        checkCount += try DevelopmentPayloadShapeTests.run()
         checkCount += try await DevelopmentCredentialTests.run()
         #endif
         print("\(checkCount) provider adapter checks passed; no NAS or registered File Provider was used.")

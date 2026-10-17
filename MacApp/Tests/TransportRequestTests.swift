@@ -124,6 +124,107 @@ private final class ByteSamples: @unchecked Sendable {
         try check(wasCancelled && samples.values == [1], "Cancellation published more bytes or terminal completion")
         print("PASS cancellation after subprocess progress reaps the helper without terminal success")
 
+        do {
+            _ = try await client.download(path: "__unsupported__", to: root.appendingPathComponent("unsupported")) { _ in }
+            throw CocoaError(.fileReadCorruptFile)
+        } catch SMBClientError.unsupportedFeature {}
+        print("PASS unsupported remote file features have a stable preserving error instead of transient protocol failure")
+
+        let statName = "stat/" + decomposed
+        let observed = try await client.stat(path: statName)
+        try check(observed?.name.utf8.elementsEqual(statName.split(separator: "/").last!.utf8) == true,
+                  "Stat changed remote UTF-8 path bytes")
+        try check(try await client.stat(path: "stat/missing") == nil, "Explicit missing observation was not preserved")
+        let shareRoot = try await client.stat(path: "")
+        try check(shareRoot?.directory == true && shareRoot?.objectIdentity != nil && shareRoot?.name == "",
+                  "The real share root cannot provide its guarded directory identity")
+        do {
+            _ = try await client.stat(path: "stat/missing-field")
+            throw CocoaError(.fileReadCorruptFile)
+        } catch SMBClientError.invalidResponse {}
+        print("PASS stat distinguishes an explicit missing item from an incomplete response")
+
+        let operationID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+        let payload = SMBMutationRequest.Payload(source: root.appendingPathComponent("local-" + decomposed).path,
+                                                 bytes: 3, sha256: String(repeating: "a", count: 64))
+        let parent = SMBMutationRequest.ParentIdentity(RemoteObjectIdentity(indexNumber: 11, createdFiletime: 22))
+        var prepared = SMBMutationRequest(operationID: operationID, kind: .createFile,
+                                           path: "fixture/prepared", parent: parent, payload: payload)
+        let upload = ByteSamples()
+        let preparation = try await client.mutate(prepared, progress: upload.append)
+        try check(preparation.outcome == .notApplied && preparation.code == "prepared" &&
+                  preparation.receipt.staged?.cleanup_safe == false && upload.values == [3],
+                  "Prepared receipt or safe default changed")
+        prepared.receipt = preparation.receipt
+        let committed = try await client.mutate(prepared)
+        try check(committed.outcome == .committed && committed.sha256 == payload.sha256,
+                  "Typed receipt did not round-trip into a verified commit")
+        let reconciled = try await client.mutate(prepared, reconcile: true)
+        try check(reconciled.outcome == .committed, "Reconciliation did not route its typed result")
+        let moved = try await client.mutate(SMBMutationRequest(operationID: operationID, kind: .move,
+            path: "fixture/source", parent: parent, destination: "fixture/moved",
+            destinationParent: .init(RemoteObjectIdentity(indexNumber: 33, createdFiletime: 44)), expected: observed))
+        try check(moved.entry?.name == "moved", "Move did not carry distinct frozen source/destination parent identities")
+        print("PASS typed mutation receipts, real upload samples, conservative cleanup default and reconciliation")
+
+        var allocatedRequest = SMBMutationRequest(operationID: operationID, kind: .createFile,
+            path: "fixture/allocated", parent: parent, payload: payload)
+        let allocatedBytes = ByteSamples()
+        let allocation = try await client.mutate(allocatedRequest, progress: allocatedBytes.append)
+        try check(allocation.code == "allocated" && allocation.receipt.staged?.phase == .allocated &&
+                  allocation.receipt.staged?.security_sha256 == String(repeating: "b", count: 64) && allocatedBytes.values.isEmpty,
+                  "Allocation receipt was absent, unqualified or reported bytes before acknowledgement")
+        allocatedRequest.receipt = allocation.receipt
+        let preparedAllocation = try await client.mutate(allocatedRequest, progress: allocatedBytes.append)
+        try check(preparedAllocation.code == "prepared" && preparedAllocation.receipt.staged?.phase == .prepared && allocatedBytes.values == [3],
+                  "Acknowledged allocation did not transition through verified preparation")
+        allocatedRequest.receipt = preparedAllocation.receipt
+        let publishedAllocation = try await client.mutate(allocatedRequest, progress: allocatedBytes.append)
+        try check(publishedAllocation.outcome == .committed && allocatedBytes.values == [3], "Prepared publication repeated upload progress")
+        print("PASS actual subprocess allocation precedes every byte and a qualified receipt round-trips through preparation and publication")
+
+        for mode in ["wrong-id", "wrong-hash", "wrong-name", "wrong-size", "bad-outcome", "missing-cleanup", "wrong-artifact",
+                     "negative", "regressing", "excessive", "allocated-missing-security", "allocated-bad-phase",
+                     "allocated-directory", "allocated-nonempty", "allocated-unsafe"] {
+            do {
+                _ = try await client.mutate(SMBMutationRequest(operationID: operationID, kind: .createFile,
+                                                               path: "fixture/" + mode, parent: parent, payload: payload))
+                throw CocoaError(.fileReadCorruptFile)
+            } catch SMBClientError.invalidResponse {}
+        }
+        print("PASS malformed mutation identity, bytes, hash, receipts and progress cannot report success")
+
+        for request in [
+            SMBMutationRequest(operationID: operationID, kind: .createDirectory, path: "fixture/invalid",
+                parent: .init(RemoteObjectIdentity(indexNumber: 0, createdFiletime: 22))),
+            SMBMutationRequest(operationID: operationID, kind: .move, path: "fixture/source", parent: parent,
+                destination: "fixture/moved", expected: observed),
+            SMBMutationRequest(operationID: operationID, kind: .delete, path: "fixture/source", parent: parent,
+                destinationParent: parent, expected: observed)
+        ] {
+            do { _ = try await client.mutate(request); throw CocoaError(.fileReadCorruptFile) }
+            catch SMBClientError.invalidResponse {}
+        }
+        try check(observed?.observation.objectIdentity == RemoteObjectIdentity(indexNumber: 1, createdFiletime: 1),
+                  "Typed SMB identity was not attached to a listing/stat observation")
+        print("PASS parent identities are required, nonzero, move-scoped and preserved by the actual subprocess wire")
+
+        for mode in ["missing", "file", "zero", "reparse"] {
+            do {
+                try await client.list(path: "__listing__/" + mode) { _ in }
+                throw CocoaError(.fileReadCorruptFile)
+            } catch SMBClientError.invalidResponse {}
+        }
+        print("PASS directory listings require a terminal ordinary-directory identity before reporting complete")
+
+        try await scopedWire(client, parent: parent, operationID: operationID)
+        try await treeScopedWire(client, parent: parent, operationID: operationID, directory: root)
+        let unknown = try await client.mutate(SMBMutationRequest(operationID: operationID, kind: .createFile,
+            path: "fixture/allocation-unknown-archive", parent: parent, payload: payload))
+        try check(unknown.outcome == .uncertain && unknown.code == "allocation_unknown" && unknown.receipt.archived?.cleanup_safe == false,
+                  "An unknown allocation discarded newly reported preserved archive evidence")
+        print("PASS unknown allocation preserves conservative archive evidence instead of dropping it during decoding")
+
         let largestPassword = String(repeating: "\u{e9}", count: 2048)
         try await SMBClient(settings: settings, developmentPassword: largestPassword, helperURL: helper).probe()
         for password in ["", largestPassword + "\u{e9}"] {
@@ -137,6 +238,65 @@ private final class ByteSamples: @unchecked Sendable {
             throw SMBClientError.invalidResponse
         } catch HelperOperationError.oversizedInput { }
         print("PASS UTF-8 password limit and bounded complete request fail before launch")
+    }
+
+    private static func scopedWire(_ client: SMBClient, parent: SMBMutationRequest.ParentIdentity, operationID: UUID) async throws {
+        let root = "fixture/Caf\u{e9}"
+        let encoded = try JSONSerialization.data(withJSONObject: ["root_path": root,
+            "root": ["index_number": 11, "created_filetime": 22], "parent": ["index_number": 55, "created_filetime": 66]])
+        let scope = try JSONDecoder().decode(SMBDeleteScope.self, from: encoded)
+        let page = RequestPages()
+        _ = try await client.listDirectory(path: root, deleteScope: scope) { await page.append($0) }
+        let wire = try unhex(await page.names[0])
+        let request = try JSONSerialization.jsonObject(with: wire) as! [String: Any]
+        let operation = request["operation"] as! [String: Any], captured = operation["delete_scope"] as! [String: Any]
+        try check((captured["root_path"] as? String).map { Data($0.utf8) } == Data(root.utf8),
+                  "Scoped list changed frozen root UTF-8 bytes")
+        try check(try await client.stat(path: root + "/missing", deleteScope: scope) == nil,
+                  "Scoped stat could not preserve explicit desired absence")
+        let target = SMBEntry(name: "delete", bytes: 3, directory: false, index_number: 1,
+            created_filetime: 1, modified_filetime: 0, changed_filetime: 0, attributes: 0)
+        let result = try await client.mutate(SMBMutationRequest(operationID: operationID, kind: .delete,
+            path: root + "/delete", parent: parent, expected: target, deleteScope: scope))
+        try check(result.outcome == .committed, "Scoped mutation did not preserve its typed request")
+        do { _ = try await client.stat(path: root + "/scope-changed", deleteScope: scope); throw CocoaError(.fileReadCorruptFile) }
+        catch SMBClientError.scopeChanged {}
+        do { _ = try await client.stat(path: "outside/file", deleteScope: scope); throw CocoaError(.fileReadCorruptFile) }
+        catch SMBClientError.invalidResponse {}
+        print("PASS actual subprocess list/stat/delete preserve frozen selection fences, exact Unicode root bytes and explicit scope refusal")
+    }
+
+    private static func treeScopedWire(_ client: SMBClient, parent: SMBMutationRequest.ParentIdentity,
+                                       operationID: UUID, directory: URL) async throws {
+        let scope = SMBTreeScope(arena_path: "fixture/Caf\u{e9}/.mydrive-" + operationID.uuidString.lowercased() + ".tree",
+            arena: parent, parent: .init(.init(indexNumber: 55, createdFiletime: 66)))
+        for version: Int? in [nil, 1, 3] {
+            var legacy = try JSONSerialization.jsonObject(with: JSONEncoder().encode(scope)) as! [String: Any]
+            legacy["layout_version"] = version
+            do { _ = try JSONDecoder().decode(SMBTreeScope.self, from: JSONSerialization.data(withJSONObject: legacy)); throw CocoaError(.fileReadCorruptFile) }
+            catch is DecodingError {}
+        }
+        print("PASS private scopes require explicit layout2; missing or unsupported authority fails before RPC")
+        let payload = scope.arena_path, pages = RequestPages()
+        _ = try await client.listDirectory(path: payload, treeScope: scope) { await pages.append($0) }
+        let wire = try unhex(await pages.names[0]), request = try JSONSerialization.jsonObject(with: wire) as! [String: Any]
+        let operation = request["operation"] as! [String: Any], captured = operation["tree_scope"] as! [String: Any]
+        try check(captured["layout_version"] as? Int == 2 && Set(captured.keys) == Set(["layout_version", "arena_path", "arena", "parent"]) &&
+            (captured["arena_path"] as? String).map { Data($0.utf8) } == Data(scope.arena_path.utf8),
+                  "Private arena UTF-8 bytes changed in the actual subprocess request")
+        let path = payload + "/Cafe\u{301}.txt", destination = directory.appendingPathComponent("tree-read")
+        _ = try await client.download(path: path, to: destination, treeScope: scope) { _ in }
+        try check(try Data(contentsOf: destination) == Data(path.utf8), "Scoped private read changed its payload path")
+        try check(try await client.stat(path: payload + "/missing", treeScope: scope) == nil,
+                  "Private scoped stat lost explicit absence")
+        _ = try await client.mutate(.init(operationID: operationID, kind: .createFile,
+            path: scope.arena_path + "/.mydrive-" + operationID.uuidString.lowercased() + ".node", parent: parent,
+            payload: .init(source: destination.path, bytes: 3, sha256: String(repeating: "a", count: 64)), treeScope: scope))
+        do { _ = try await client.stat(path: payload + "/tree-scope-changed", treeScope: scope); throw CocoaError(.fileReadCorruptFile) }
+        catch SMBClientError.scopeChanged {}
+        do { _ = try await client.download(path: "outside/scratch", to: directory.appendingPathComponent("forbidden"), treeScope: scope) { _ in }; throw CocoaError(.fileReadCorruptFile) }
+        catch SMBClientError.invalidResponse {}
+        print("PASS real subprocess preserves private arena fences for list/stat/read/create and refuses unscoped sibling reads")
     }
 }
 #endif

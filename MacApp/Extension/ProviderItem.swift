@@ -41,11 +41,22 @@ final class ProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
     }
 
     var capabilities: NSFileProviderItemCapabilities {
-        model.entry.kind == .directory ? [.allowsReading, .allowsContentEnumerating] : [.allowsReading]
+        switch model.entry.kind {
+        case .directory:
+            var value: NSFileProviderItemCapabilities = [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems]
+            if model.id != Catalog.rootID { value.formUnion([.allowsRenaming, .allowsReparenting, .allowsDeleting]) }
+            return value
+        case .file: return [.allowsReading, .allowsWriting, .allowsRenaming, .allowsReparenting, .allowsDeleting]
+        case .symbolicLink: return [.allowsReading]
+        }
     }
 
     var fileSystemFlags: NSFileProviderFileSystemFlags {
-        model.entry.kind == .directory ? [.userReadable, .userExecutable] : [.userReadable]
+        switch model.entry.kind {
+        case .directory: [.userReadable, .userWritable, .userExecutable]
+        case .file: [.userReadable, .userWritable]
+        case .symbolicLink: [.userReadable]
+        }
     }
 
     var documentSize: NSNumber? {
@@ -64,7 +75,7 @@ final class ProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
         policy == .keepAvailable ? .downloadEagerlyAndKeepDownloaded : .downloadLazily
     }
 
-    // Every item enumerated by this read-only alpha already exists on the NAS.
+    // Only verified remote commits are ever published as uploaded items.
     // Do not invent isDownloaded: macOS owns whether bytes are materialized.
     var isUploaded: Bool { true }
 }

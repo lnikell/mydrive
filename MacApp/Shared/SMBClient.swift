@@ -3,49 +3,89 @@ import MyDriveCore
 
 enum SMBClientError: LocalizedError, Sendable {
     case authenticationRequired, serverUnreachable, invalidResponse, cancelled
-    case permissionDenied, itemMissing, diskFull, changed
+    case permissionDenied, itemMissing, diskFull, changed, unsupportedFeature, scopeChanged
     case localFailure(String), remoteFailure(String)
 
     var errorDescription: String? {
         switch self {
         case .authenticationRequired: "The NAS credentials need attention."
         case .serverUnreachable: "The NAS is unavailable. Downloaded files remain on this Mac."
-        case .invalidResponse: "The NAS experiment returned an incomplete response."
+        case .invalidResponse: "The drive operation could not be verified. Try again."
         case .cancelled: "The transfer was cancelled."
         case .permissionDenied: "The NAS account cannot access this item."
         case .itemMissing: "This item is no longer on the NAS."
         case .diskFull: "There is not enough space to complete the operation."
         case .changed: "The NAS file changed. Try opening its current version."
+        case .unsupportedFeature: "This NAS file uses a feature that MyDrive cannot transfer safely yet."
+        case .scopeChanged: "The selected folder moved or was replaced. Refresh the drive before trying again."
         case .localFailure(let message), .remoteFailure(let message): message
         }
     }
 }
 
-private struct TransportEntry: Decodable, Sendable {
+struct SMBEntry: Codable, Equatable, Sendable {
     let name: String
     let bytes: Int64
     let directory: Bool
+    let index_number: UInt64?
+    let created_filetime: UInt64
     let modified_filetime: UInt64
     let changed_filetime: UInt64
     let attributes: UInt32
 
+    var objectIdentity: RemoteObjectIdentity? {
+        guard let index_number, index_number != 0, created_filetime != 0 else { return nil }
+        return RemoteObjectIdentity(indexNumber: index_number, createdFiletime: created_filetime)
+    }
+
     var observation: RemoteEntry {
-        RemoteEntry(name: name, kind: directory ? .directory : .file,
-                    contentVersion: "\(bytes):\(modified_filetime):\(changed_filetime)",
-                    metadataVersion: "\(attributes):\(changed_filetime)", size: bytes,
-                    modifiedAt: Date(timeIntervalSince1970: Double(modified_filetime) / 10_000_000 - 11_644_473_600))
+        RemoteEntry(name: name, kind: attributes & 0x400 != 0 ? .symbolicLink : directory ? .directory : .file,
+                    contentVersion: "smb-v2:\(index_number ?? 0):\(created_filetime):\(bytes):\(modified_filetime):\(changed_filetime)",
+                    metadataVersion: "smb-v2:\(attributes):\(created_filetime):\(changed_filetime)", size: bytes,
+                    modifiedAt: Date(timeIntervalSince1970: Double(modified_filetime) / 10_000_000 - 11_644_473_600),
+                    objectIdentity: objectIdentity)
     }
 }
 
 private struct TransportEvent: Decodable {
     let type: String
     let code: String?
-    let entries: [TransportEntry]?
+    let entries: [SMBEntry]?
     let bytes: Int64?
     let message: String?
     let result: Completion?
 
-    struct Completion: Decodable, Sendable { let complete: Bool?; let bytes: Int64?; let entry: TransportEntry? }
+    struct Completion: Decodable, Sendable {
+        let complete: Bool?
+        let entryPresent: Bool
+        let bytes: Int64?
+        let entry: SMBEntry?
+        let operation_id: String?
+        let outcome: SMBMutationResult.Outcome?
+        let code: String?
+        let sha256: String?
+        let cleanup_pending: Bool?
+        let staged: SMBMutationRequest.Artifact?
+        let archived: SMBMutationRequest.Artifact?
+
+        private enum CodingKeys: String, CodingKey {
+            case complete, bytes, entry, operation_id, outcome, code, sha256, cleanup_pending, staged, archived
+        }
+        init(from decoder: any Decoder) throws {
+            let values = try decoder.container(keyedBy: CodingKeys.self)
+            complete = try values.decodeIfPresent(Bool.self, forKey: .complete)
+            bytes = try values.decodeIfPresent(Int64.self, forKey: .bytes)
+            entryPresent = values.contains(.entry)
+            entry = try values.decodeIfPresent(SMBEntry.self, forKey: .entry)
+            operation_id = try values.decodeIfPresent(String.self, forKey: .operation_id)
+            outcome = try values.decodeIfPresent(SMBMutationResult.Outcome.self, forKey: .outcome)
+            code = try values.decodeIfPresent(String.self, forKey: .code)
+            sha256 = try values.decodeIfPresent(String.self, forKey: .sha256)
+            cleanup_pending = try values.decodeIfPresent(Bool.self, forKey: .cleanup_pending)
+            staged = try values.decodeIfPresent(SMBMutationRequest.Artifact.self, forKey: .staged)
+            archived = try values.decodeIfPresent(SMBMutationRequest.Artifact.self, forKey: .archived)
+        }
+    }
 
     private enum CodingKeys: String, CodingKey { case type, code, entries, bytes, message, result }
     init(from decoder: any Decoder) throws {
@@ -63,28 +103,45 @@ private struct TransportEvent: Decodable {
 /// Process may decompose Unicode in argv; JSON stdin preserves their UTF-8 form.
 private enum TransportOperation: Encodable, Sendable {
     case probe
-    case list(path: String)
-    case read(path: String, destination: String)
+    case list(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
+    case read(path: String, destination: String, treeScope: SMBTreeScope?)
+    case stat(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
+    case mutate(SMBMutationRequest)
+    case reconcile(SMBMutationRequest)
 
     var command: String {
         switch self {
         case .probe: "probe"
         case .list: "list"
         case .read: "read"
+        case .stat: "stat"
+        case .mutate: "mutate"
+        case .reconcile: "reconcile"
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case type, path, destination }
+    var uploadLimit: Int64? {
+        if case .mutate(let request) = self { return request.payload?.bytes }
+        return nil
+    }
+
+    private enum CodingKeys: String, CodingKey { case type, path, destination, request, delete_scope, tree_scope }
 
     func encode(to encoder: any Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(command, forKey: .type)
         switch self {
         case .probe: break
-        case .list(let path): try values.encode(path, forKey: .path)
-        case .read(let path, let destination):
+        case .list(let path, let scope, let treeScope), .stat(let path, let scope, let treeScope):
+            try values.encode(path, forKey: .path)
+            try values.encodeIfPresent(scope, forKey: .delete_scope)
+            try values.encodeIfPresent(treeScope, forKey: .tree_scope)
+        case .read(let path, let destination, let treeScope):
             try values.encode(path, forKey: .path)
             try values.encode(destination, forKey: .destination)
+            try values.encodeIfPresent(treeScope, forKey: .tree_scope)
+        case .mutate(let request), .reconcile(let request):
+            try values.encode(request, forKey: .request)
         }
     }
 }
@@ -136,19 +193,37 @@ struct SMBClient: Sendable {
         try await run(.probe, passwordOverride: password)
     }
 
+    @discardableResult
     func list(path: String, pageSize: Int = 128,
-              onPage: @escaping @Sendable ([RemoteEntry]) async throws -> Void) async throws {
+              onPage: @escaping @Sendable ([RemoteEntry]) async throws -> Void) async throws -> RemoteObjectIdentity {
+        let directory = try await listDirectory(path: path, pageSize: pageSize, onPage: onPage)
+        guard let identity = directory.objectIdentity else { throw SMBClientError.invalidResponse }
+        return identity
+    }
+
+    func listDirectory(path: String, pageSize: Int = 128, deleteScope: SMBDeleteScope? = nil,
+                       treeScope: SMBTreeScope? = nil,
+                       onPage: @escaping @Sendable ([RemoteEntry]) async throws -> Void) async throws -> SMBEntry {
         guard (1...1000).contains(pageSize) else { throw SMBClientError.invalidResponse }
-        try await run(.list(path: path), onPage: { entries in
+        if let deleteScope, !deleteScope.contains(path) { throw SMBClientError.invalidResponse }
+        if let treeScope, !treeScope.isValid || !treeScope.contains(path) { throw SMBClientError.invalidResponse }
+        guard deleteScope == nil || treeScope == nil else { throw SMBClientError.invalidResponse }
+        let result = try await run(.list(path: path, deleteScope: deleteScope, treeScope: treeScope), onPage: { entries in
             for offset in stride(from: 0, to: entries.count, by: pageSize) {
                 try await onPage(Array(entries[offset..<min(offset + pageSize, entries.count)]))
             }
         })
+        guard let directory = result?.entry, directory.directory,
+              directory.attributes & 0x400 == 0, directory.objectIdentity != nil else {
+            throw SMBClientError.invalidResponse
+        }
+        return directory
     }
 
-    func download(path: String, to destination: URL,
+    func download(path: String, to destination: URL, treeScope: SMBTreeScope? = nil,
                   progress: @escaping @Sendable (Int64) -> Void) async throws -> RemoteEntry {
-        let result = try await run(.read(path: path, destination: destination.path), progress: progress)
+        if let treeScope, !treeScope.isValid || !treeScope.containsPayload(path) { throw SMBClientError.invalidResponse }
+        let result = try await run(.read(path: path, destination: destination.path, treeScope: treeScope), progress: progress)
         guard let entry = result?.entry else {
             try? FileManager.default.removeItem(at: destination)
             throw SMBClientError.invalidResponse
@@ -156,12 +231,76 @@ struct SMBClient: Sendable {
         return entry.observation
     }
 
+    func stat(path: String, deleteScope: SMBDeleteScope? = nil, treeScope: SMBTreeScope? = nil) async throws -> SMBEntry? {
+        if let deleteScope, !deleteScope.contains(path) { throw SMBClientError.invalidResponse }
+        if let treeScope, !treeScope.isValid || !treeScope.contains(path) { throw SMBClientError.invalidResponse }
+        guard deleteScope == nil || treeScope == nil else { throw SMBClientError.invalidResponse }
+        guard let result = try await run(.stat(path: path, deleteScope: deleteScope, treeScope: treeScope)), result.entryPresent else {
+            throw SMBClientError.invalidResponse
+        }
+        if let entry = result.entry, entry.bytes < 0 { throw SMBClientError.invalidResponse }
+        return result.entry
+    }
+
+    func mutate(_ request: SMBMutationRequest, reconcile: Bool = false,
+                progress: (@Sendable (Int64) -> Void)? = nil) async throws -> SMBMutationResult {
+        guard request.parent.isValid,
+              (request.kind == .move ? request.destination_parent?.isValid == true : request.destination_parent == nil) else {
+            throw SMBClientError.invalidResponse
+        }
+        if let scope = request.delete_scope {
+            guard scope.contains(request.path), [.delete, .cleanup].contains(request.kind) else { throw SMBClientError.invalidResponse }
+        }
+        guard request.delete_scope == nil || request.tree_scope == nil else { throw SMBClientError.invalidResponse }
+        if let scope = request.tree_scope, !scope.isValid || !scope.contains(request.path) { throw SMBClientError.invalidResponse }
+        let result = try await run(reconcile ? .reconcile(request) : .mutate(request), progress: progress)
+        guard let result, result.operation_id == request.operation_id,
+              let outcome = result.outcome, let code = result.code,
+              let cleanup = result.cleanup_pending else { throw SMBClientError.invalidResponse }
+        if let entry = result.entry, entry.bytes < 0 { throw SMBClientError.invalidResponse }
+        if outcome == .committed {
+            if [.createFile, .createDirectory, .replaceFile, .move].contains(request.kind) {
+                let path = request.destination ?? request.path
+                guard let entry = result.entry,
+                      entry.name.utf8.elementsEqual(path.split(separator: "/").last!.utf8),
+                      entry.directory == (request.kind == .createDirectory || request.expected?.directory == true) else {
+                    throw SMBClientError.invalidResponse
+                }
+            }
+            if let payload = request.payload {
+                guard result.entry?.bytes == payload.bytes, result.sha256 == payload.sha256 else {
+                    throw SMBClientError.invalidResponse
+                }
+            }
+        }
+        if let hash = result.sha256, !SMBMutationRequest.validHash(hash) { throw SMBClientError.invalidResponse }
+        let receipt = SMBMutationRequest.Receipt(staged: result.staged, archived: result.archived)
+        try request.validate(receipt: receipt)
+        if code == "allocation_unknown" {
+            guard outcome == .uncertain, request.receipt.staged == nil,
+                  receipt.staged == nil else { throw SMBClientError.invalidResponse }
+            if let archived = request.receipt.archived, receipt.archived != archived { throw SMBClientError.invalidResponse }
+        }
+        if outcome == .notApplied && code == "allocated" {
+            guard receipt.staged?.phase == .allocated, receipt.archived == nil else { throw SMBClientError.invalidResponse }
+        }
+        if outcome == .notApplied && code == "prepared" {
+            guard let staged = receipt.staged, staged.phase == .prepared,
+                  request.payload.map({ staged.entry.bytes == $0.bytes }) ?? staged.entry.directory else {
+                throw SMBClientError.invalidResponse
+            }
+        }
+        return SMBMutationResult(operation_id: request.operation_id, outcome: outcome, code: code,
+                                 entry: result.entry, sha256: result.sha256,
+                                 cleanup_pending: cleanup, receipt: receipt)
+    }
+
     @discardableResult private func run(_ operation: TransportOperation,
                      passwordOverride: String? = nil,
                      onPage: (@Sendable ([RemoteEntry]) async throws -> Void)? = nil,
                      progress: (@Sendable (Int64) -> Void)? = nil) async throws -> TransportEvent.Completion? {
         try Task.checkCancellation()
-        let receiver = TransportReceiver(command: operation.command, onPage: onPage, progress: progress)
+        let receiver = TransportReceiver(command: operation.command, uploadLimit: operation.uploadLimit, onPage: onPage, progress: progress)
         #if MYDRIVE_DEVELOPMENT
         let password = try passwordOverride ?? developmentPasswordOverride ?? CredentialStore.password(for: settings)
         let helperURL = try developmentHelperURL ?? AppStorage.transportURL()
@@ -183,6 +322,7 @@ struct SMBClient: Sendable {
 /// Page size is checked during decoding, before allocating an unbounded array.
 private actor TransportReceiver {
     let command: String
+    let uploadLimit: Int64?
     let onPage: (@Sendable ([RemoteEntry]) async throws -> Void)?
     let progress: (@Sendable (Int64) -> Void)?
     private var connected = false
@@ -190,9 +330,10 @@ private actor TransportReceiver {
     private var lastProgress: Int64 = 0
     private var result: TransportEvent.Completion?
 
-    init(command: String, onPage: (@Sendable ([RemoteEntry]) async throws -> Void)?,
+    init(command: String, uploadLimit: Int64?, onPage: (@Sendable ([RemoteEntry]) async throws -> Void)?,
          progress: (@Sendable (Int64) -> Void)?) {
         self.command = command
+        self.uploadLimit = uploadLimit
         self.onPage = onPage
         self.progress = progress
     }
@@ -215,7 +356,9 @@ private actor TransportReceiver {
             guard command == "list", let entries = event.entries else { throw SMBClientError.invalidResponse }
             try await onPage?(entries.map(\.observation))
         case "progress":
-            guard command == "read", let bytes = event.bytes, bytes >= lastProgress else {
+            guard (command == "read" || command == "mutate" && uploadLimit != nil),
+                  let bytes = event.bytes, bytes >= lastProgress,
+                  uploadLimit.map({ bytes <= $0 }) ?? true else {
                 throw SMBClientError.invalidResponse
             }
             if bytes > lastProgress {
@@ -252,23 +395,25 @@ private actor TransportReceiver {
         case "not_found": return .itemMissing
         case "disk_full": return .diskFull
         case "changed", "resume_refused": return .changed
+        case "scope_changed", "tree_scope_changed": return .scopeChanged
         case "connection_lost", "timed_out", "transport_io": return .serverUnreachable
         case "local_io": return .localFailure(message)
+        case "unsupported": return .unsupportedFeature
         default: return .remoteFailure(message)
         }
     }
 }
 
 private struct BoundedEntries: Decodable {
-    let values: [TransportEntry]
+    let values: [SMBEntry]
 
     init(from decoder: any Decoder) throws {
         var container = try decoder.unkeyedContainer()
         if let count = container.count, count > 1000 { throw SMBClientError.invalidResponse }
-        var values: [TransportEntry] = []
+        var values: [SMBEntry] = []
         while !container.isAtEnd {
             guard values.count < 1000 else { throw SMBClientError.invalidResponse }
-            values.append(try container.decode(TransportEntry.self))
+            values.append(try container.decode(SMBEntry.self))
         }
         self.values = values
     }

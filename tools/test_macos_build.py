@@ -136,6 +136,7 @@ class BuildPolicyTests(unittest.TestCase):
         self.assertEqual(host["MyDriveDevelopmentCredentialBuildID"], provider["MyDriveDevelopmentCredentialBuildID"])
         self.assertTrue((app / "Contents/Frameworks/Sparkle.framework/Sparkle").is_symlink())
         self.assertEqual(host["CFBundleVersion"], provider["CFBundleVersion"])
+        self.assertIs(provider["NSExtension"]["NSExtensionFileProviderWantsFlattenedPackages"], False)
 
     def test_local_development_target_is_injected_but_never_shipped_in_production(self):
         local = self.root / ".local"
@@ -168,6 +169,7 @@ class BuildPolicyTests(unittest.TestCase):
         self.assertEqual(host["SUFeedURL"], "https://github.com/example/mydrive/releases/latest/download/appcast.xml")
         self.assertTrue(host["SURequireSignedFeed"] and host["SUVerifyUpdateBeforeExtraction"])
         self.assertNotIn("SUFeedURL", provider)
+        self.assertIs(provider["NSExtension"]["NSExtensionFileProviderWantsFlattenedPackages"], False)
         self.assertNotIn("MyDriveDevelopmentConnection", host)
         self.assertNotIn("MyDriveDevelopmentConnection", provider)
         self.assertNotIn("SUEnableDownloaderService", host)

@@ -103,6 +103,7 @@ def prepare(app, build, sparkle, identity, root=ROOT, environment=None):
                         "NSExtensionPrincipalClass": "FileProviderExtension",
                         "NSExtensionFileProviderDocumentGroup": config["app_group_id"],
                         "NSExtensionFileProviderSupportsEnumeration": True,
+                        "NSExtensionFileProviderWantsFlattenedPackages": False,
                         "NSExtensionFileProviderActions": [
                             {"NSExtensionFileProviderActionIdentifier": "local.mydrive.keepDownloaded",
                              "NSExtensionFileProviderActionName": "Keep Downloaded",
