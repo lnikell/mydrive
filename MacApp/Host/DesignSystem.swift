@@ -31,6 +31,7 @@ enum Palette {
     static let greenSoft = dynamic(light: hex(0x28CD41, 0.12), dark: hex(0x32D74B, 0.18))
     static let orange = dynamic(light: hex(0xFF9500), dark: hex(0xFF9F0A))
     static let red = dynamic(light: hex(0xFF3B30), dark: hex(0xFF453A))
+    static let redSoft = dynamic(light: hex(0xFF3B30, 0.10), dark: hex(0xFF453A, 0.18))
     static let purple = dynamic(light: hex(0xAF52DE), dark: hex(0xBF5AF2))
 
     private static func dynamic(light: NSColor, dark: NSColor) -> Color {
@@ -349,6 +350,8 @@ struct SegmentedPicker<Value: Hashable>: View {
         let value: Value
         let title: String
         var enabled = true
+        /// Explains why a disabled segment cannot be chosen.
+        var help: String?
         var id: String { title }
     }
 
@@ -373,7 +376,7 @@ struct SegmentedPicker<Value: Hashable>: View {
                 .buttonStyle(.plain)
                 .disabled(!segment.enabled)
                 .opacity(segment.enabled ? 1 : 0.45)
-                .help(segment.enabled ? "" : "Per-file transfer tracking isn't available yet.")
+                .help(segment.help ?? "")
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
         }
@@ -391,10 +394,12 @@ struct FilterField: View {
     var body: some View {
         HStack(spacing: 6) {
             Icon(.search, size: 14).foregroundStyle(Palette.tertiary)
-            TextField(prompt, text: $text, prompt: Text(prompt).foregroundStyle(Palette.tertiary))
+            TextField("", text: $text)
                 .textFieldStyle(.plain)
                 .font(Typography.body)
                 .foregroundStyle(Palette.primary)
+                .placeholder(prompt, when: text.isEmpty)
+                .accessibilityLabel(prompt)
                 .focused($focused)
                 .onExitCommand { text = ""; focused = false }
             if !text.isEmpty {
@@ -519,5 +524,166 @@ struct IconTile: View {
             .fill(fill)
             .frame(width: size, height: size)
             .overlay(Icon(icon, size: size * 0.44).foregroundStyle(tint))
+    }
+}
+
+// MARK: - Forms
+
+/// The Figma "Input" component: 280 × 28 pt field with a 6 pt radius. Focus
+/// adds an accent border and a soft 3 pt ring; errors use the red equivalents.
+struct InputChrome: ViewModifier {
+    var focused = false
+    var error = false
+    var width: CGFloat = 280
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        content
+            .textFieldStyle(.plain)
+            .focusEffectDisabled()
+            .padding(.leading, 9)
+            .padding(.trailing, 7)
+            .frame(width: width, height: 28)
+            .background(shape.fill(Palette.window))
+            .overlay(shape.strokeBorder(error ? Palette.red : focused ? Palette.accent : Palette.strongSeparator, lineWidth: 1))
+            .background {
+                if error || focused {
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .fill(error ? Palette.redSoft : Palette.accentSoft)
+                        .padding(-3)
+                }
+            }
+            .opacity(isEnabled ? 1 : 0.5)
+    }
+}
+
+extension View {
+    /// Draws the design's tertiary placeholder; macOS ignores styling on text field prompts.
+    func placeholder(_ text: String, when empty: Bool, font: Font = Typography.body) -> some View {
+        overlay(alignment: .leading) {
+            if empty {
+                Text(text).font(font).foregroundStyle(Palette.tertiary).lineLimit(1)
+                    .allowsHitTesting(false).accessibilityHidden(true)
+            }
+        }
+    }
+}
+
+/// The "Input" component's Read-only state: a saved value that cannot change.
+struct ReadOnlyValue: View {
+    let value: String
+    var mono = false
+    var body: some View {
+        Text(value)
+            .font(mono ? Typography.mono : Typography.body)
+            .foregroundStyle(Palette.secondary)
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .textSelection(.enabled)
+            .padding(.horizontal, 9)
+            .frame(width: 280, height: 28, alignment: .leading)
+    }
+}
+
+/// The Figma "Popup" component's appearance, for menu buttons that choose one option.
+struct PopupChrome: ViewModifier {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        HStack(spacing: 8) {
+            content.font(Typography.callout).foregroundStyle(Palette.primary)
+            Icon(.chevronDown, size: 11).foregroundStyle(Palette.secondary)
+        }
+        .padding(.leading, 10)
+        .padding(.trailing, 7)
+        .padding(.vertical, 4)
+        .background(shape.fill(Palette.control))
+        .overlay(shape.strokeBorder(Palette.separator, lineWidth: 1))
+        .shadow(color: .black.opacity(0.08), radius: 0.5, y: 1)
+        .opacity(isEnabled ? 1 : 0.5)
+        .contentShape(Rectangle())
+    }
+}
+
+/// A titled group of form rows in a rounded box, with an optional accessory
+/// beside the title and a footnote or inline error below the box.
+struct FormGroup<Accessory: View, Rows: View>: View {
+    let title: String
+    var footnote: String?
+    var error: String?
+    @ViewBuilder var accessory: () -> Accessory
+    @ViewBuilder var rows: () -> Rows
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title).font(Typography.headline).foregroundStyle(Palette.primary)
+                Spacer(minLength: 8)
+                accessory()
+            }
+            .padding(.leading, 2)
+            .frame(minHeight: 16)
+            VStack(spacing: 0) { rows() }
+                .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.subtle))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.separator, lineWidth: 1))
+            if let error {
+                FormError(message: error)
+            } else if let footnote {
+                Text(footnote)
+                    .font(Typography.subheadline)
+                    .foregroundStyle(Palette.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 2)
+            }
+        }
+    }
+}
+
+extension FormGroup where Accessory == EmptyView {
+    init(title: String, footnote: String? = nil, error: String? = nil, @ViewBuilder rows: @escaping () -> Rows) {
+        self.init(title: title, footnote: footnote, error: error, accessory: { EmptyView() }, rows: rows)
+    }
+}
+
+/// One labelled row in a form box: 44 pt, or 52 pt with a description.
+struct FormRow<Control: View>: View {
+    let label: String
+    var detail: String?
+    var separator = true
+    @ViewBuilder var control: () -> Control
+
+    var body: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(Typography.body).foregroundStyle(Palette.primary)
+                if let detail { Text(detail).font(Typography.subheadline).foregroundStyle(Palette.secondary) }
+            }
+            .lineLimit(1)
+            .layoutPriority(1)
+            Spacer(minLength: 0)
+            control()
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 8)
+        .frame(height: detail == nil ? 44 : 52)
+        .overlay(alignment: .top) { if separator { Hairline() } }
+    }
+}
+
+struct FormError: View {
+    let message: String
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Icon(.warning, size: 13).foregroundStyle(Palette.red).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 2 }
+            Text(message).font(Typography.subheadline).foregroundStyle(Palette.red)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+        }
+        .padding(.horizontal, 2)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Error: \(message)")
     }
 }

@@ -17,6 +17,10 @@ struct UninstallPreparation {
     private(set) var busy = true
     private(set) var preparingUninstall = false
     private(set) var uninstall = UninstallPreparation()
+    /// The drive being connected by `add`, so its progress can be shown.
+    private(set) var connecting: DriveModel?
+    /// Why the last `add` failed, if it did.
+    private(set) var addFailure: (any Error)?
     private let storage: Result<ConnectionStore, Error>
     private let backend: any DriveConnectionBackend
     private let makeMonitor: @MainActor () -> ConnectionMonitor
@@ -89,14 +93,17 @@ struct UninstallPreparation {
         guard !busy else { return false }
         uninstall.verifiedNoDomains = false
         busy = true
-        defer { busy = false }
+        addFailure = nil
+        defer { busy = false; connecting = nil }
         do {
             let store = try storage.get()
             try ConnectionStore.validate(settings)
             if let existing = drives.first(where: { $0.id == settings.domainID }) {
                 guard existing.settings == settings else { throw ConnectionStoreError.endpointChanged }
+                connecting = existing
                 let connected = await existing.reconnect(password: password)
                 status = connected ? "Connected \(existing.name)." : existing.status
+                if !connected { addFailure = existing.connectFailure }
                 return connected
             }
             guard try store.existingSettings(for: settings.domainID) == nil else {
@@ -104,11 +111,17 @@ struct UninstallPreparation {
             }
             let drive = DriveModel(settings: settings, isRegistered: false,
                                    store: store, backend: backend, monitor: makeMonitor())
+            connecting = drive
             let connected = await drive.reconnect(password: password)
             if (try store.existingSettings(for: settings.domainID)) != nil { drives.append(drive) }
             status = connected ? "Added \(drive.name)." : drive.status
+            if !connected { addFailure = drive.connectFailure }
             return connected
-        } catch { status = error.localizedDescription; return false }
+        } catch {
+            addFailure = error
+            status = error.localizedDescription
+            return false
+        }
     }
 
     func remove(_ drive: DriveModel) async -> Bool {

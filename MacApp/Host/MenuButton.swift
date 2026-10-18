@@ -6,7 +6,7 @@ import SwiftUI
 enum MenuEntry {
     case header(String)
     case item(String, image: NSImage? = nil, key: String = "", enabled: Bool = true,
-              tooltip: String? = nil, action: () -> Void)
+              tooltip: String? = nil, checked: Bool = false, action: () -> Void)
     case submenu(String, image: NSImage? = nil, entries: [MenuEntry])
     case separator
 }
@@ -33,11 +33,12 @@ enum MenuEntry {
             switch entry {
             case let .header(title):
                 menu.addItem(.sectionHeader(title: title))
-            case let .item(title, image, key, enabled, tooltip, action):
+            case let .item(title, image, key, enabled, tooltip, checked, action):
                 let item = ActionMenuItem(title: title, key: key, handler: action)
                 item.image = image
                 item.isEnabled = enabled
                 item.toolTip = tooltip
+                item.state = checked ? .on : .off
                 menu.addItem(item)
             case let .submenu(title, image, entries):
                 let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")

@@ -55,14 +55,19 @@ enum MountHealth: Equatable {
     }
 }
 
-extension DriveModel {
-    /// Every saved connection is SMB today; other protocols are not implemented yet.
-    var kind: MountKind { .smb }
-
+extension ConnectionSettings {
+    /// The smb:// address, without the default port.
     var address: String {
         let server = host.hasSuffix(":445") ? String(host.dropLast(4)) : host
         return "smb://\(server)/\(share)"
     }
+}
+
+extension DriveModel {
+    /// Every saved connection is SMB today; other protocols are not implemented yet.
+    var kind: MountKind { .smb }
+
+    var address: String { settings.address }
 
     var health: MountHealth {
         if busy { return .working(status.isEmpty ? "Working…" : status) }

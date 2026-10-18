@@ -3,6 +3,8 @@ import SwiftUI
 
 enum ActivityFilter: Hashable { case all, uploading, downloading, queued, issues }
 
+private let transferHelp = "Per-file transfer tracking isn't available yet."
+
 private enum Column {
     static let mount: CGFloat = 150
     static let progress: CGFloat = 190
@@ -37,9 +39,9 @@ private enum Column {
             PaneToolbar(title: "Activity", detail: inFlight > 0 ? "\(inFlight) in progress" : nil) {
                 SegmentedPicker(selection: $filter, segments: [
                     .init(value: .all, title: "All"),
-                    .init(value: .uploading, title: "Uploading", enabled: false),
-                    .init(value: .downloading, title: "Downloading", enabled: false),
-                    .init(value: .queued, title: "Queued", enabled: false),
+                    .init(value: .uploading, title: "Uploading", enabled: false, help: transferHelp),
+                    .init(value: .downloading, title: "Downloading", enabled: false, help: transferHelp),
+                    .init(value: .queued, title: "Queued", enabled: false, help: transferHelp),
                     .init(value: .issues, title: "Issues")
                 ])
                 Button {} label: {

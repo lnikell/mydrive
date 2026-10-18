@@ -12,6 +12,11 @@ import Observation
     private(set) var monitorState: ConnectionMonitor.State?
     /// When known folders were last checked successfully in this session.
     private(set) var lastChecked: Date?
+    /// The step of a connection in progress: 1 checks the server and signs in,
+    /// 2 adds the drive to Finder, 0 when no connection is running.
+    private(set) var connectStep = 0
+    /// Why the last connection attempt failed, so a form can point at the cause.
+    private(set) var connectFailure: (any Error)?
     private(set) var isRegistered: Bool
     private let store: ConnectionStore
     private let backend: any DriveConnectionBackend
@@ -38,16 +43,19 @@ import Observation
         guard !busy else { return false }
         busy = true
         monitoringEnabled = true
-        defer { busy = false }
+        connectFailure = nil
+        defer { busy = false; connectStep = 0 }
         await monitor.stop()
         do {
             status = "Checking connection…"
+            connectStep = 1
             try await backend.verify(settings, password: password)
             try Task.checkCancellation()
             // Keep the record if registration/refresh fails. Startup can offer
             // the same ID again without abandoning a partially accepted domain.
             try store.save(settings)
             status = "Connecting in Finder…"
+            connectStep = 2
             try await backend.activate(settings, password: password)
             try Task.checkCancellation()
             isRegistered = true
@@ -55,6 +63,7 @@ import Observation
             await startMonitoring()
             return true
         } catch {
+            connectFailure = error
             if let registered = try? await backend.registeredDomainIDs() {
                 isRegistered = registered.contains(id)
             }
