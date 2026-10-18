@@ -77,6 +77,12 @@ run_test "$TASK_BUILD/connection-store-tests"
   -lsqlite3 -o "$TASK_BUILD/connection-removal-storage-tests"
 run_test "$TASK_BUILD/connection-removal-storage-tests"
 
+"${TASK_SWIFT[@]}" -module-name DomainRemovalPreparationTests \
+  "$TASK_ROOT/MacApp/Host/DomainRemovalPreparation.swift" \
+  "$TASK_ROOT/MacApp/Tests/DomainRemovalPreparationTests.swift" \
+  -framework FileProvider -o "$TASK_BUILD/domain-removal-preparation-tests"
+run_test "$TASK_BUILD/domain-removal-preparation-tests"
+
 for TASK_MODE in production development; do
   TASK_MODEL_SWIFT=("${TASK_SWIFT[@]}")
   if [[ "$TASK_MODE" == development ]]; then TASK_MODEL_SWIFT+=(-D MYDRIVE_DEVELOPMENT); fi
@@ -84,6 +90,7 @@ for TASK_MODE in production development; do
     -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
     "$TASK_ROOT"/MacApp/Shared/*.swift \
     "$TASK_ROOT/MacApp/Host/ConnectionMonitor.swift" "$TASK_ROOT/MacApp/Host/DomainManagement.swift" \
+    "$TASK_ROOT/MacApp/Host/DomainRemovalPreparation.swift" \
     "$TASK_ROOT/MacApp/Host/DriveConnectionBackend.swift" "$TASK_ROOT/MacApp/Host/DriveModel.swift" \
     "$TASK_ROOT/MacApp/Host/AppModel.swift" "$TASK_ROOT/MacApp/Tests/DriveModelTests.swift" \
     "$TASK_BUILD/libMyDriveCore.a" -lsqlite3 -framework FileProvider -framework Security -framework AppKit \
@@ -101,6 +108,7 @@ run_test "$TASK_BUILD/transport-request-tests" "$TASK_ROOT/MacApp/Tests/Fixtures
 "${TASK_SWIFT[@]}" -module-name DomainLifetimeTests \
   -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
   "$TASK_ROOT"/MacApp/Shared/*.swift "$TASK_ROOT/MacApp/Host/DomainManagement.swift" \
+  "$TASK_ROOT/MacApp/Host/DomainRemovalPreparation.swift" \
   "$TASK_ROOT/MacApp/Tests/DomainLifetimeTests.swift" "$TASK_BUILD/libMyDriveCore.a" \
   -lsqlite3 -framework FileProvider -framework Security -framework AppKit \
   -o "$TASK_BUILD/domain-lifetime-tests"
@@ -112,6 +120,7 @@ run_test "$TASK_BUILD/domain-lifetime-tests"
   -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
   "$TASK_ROOT"/MacApp/Shared/*.swift \
   "$TASK_ROOT/MacApp/Host/DomainManagement.swift" \
+  "$TASK_ROOT/MacApp/Host/DomainRemovalPreparation.swift" \
   "$TASK_ROOT/MacApp/Host/HostDiagnostic.swift" \
   "$TASK_ROOT/MacApp/Host/ProbeReport.swift" \
   "$TASK_ROOT/MacApp/Host/LocalNetworkProbe.swift" \

@@ -78,6 +78,11 @@ private struct AdapterTests {
             print("PASS \(checks) tree import groups")
             return
         }
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--removal-eviction-only" {
+            let checks = try await RemovalEvictionTests.run() + ControlTaskScopeTests.run()
+            print("PASS \(checks) removal eviction groups")
+            return
+        }
 
         let temporary = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: true)
@@ -256,6 +261,8 @@ private struct AdapterTests {
         checkCount += try await RecursiveDeleteTests.run()
         checkCount += try await ProviderActionTests.run()
         checkCount += try await PolicyAwareEvictionTests.run()
+        checkCount += try await RemovalEvictionTests.run()
+        checkCount += try await ControlTaskScopeTests.run()
         #if MYDRIVE_DEVELOPMENT
         checkCount += try DevelopmentPayloadShapeTests.run()
         checkCount += try await DevelopmentCredentialTests.run()

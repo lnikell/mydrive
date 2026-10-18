@@ -12,4 +12,5 @@ let domainControlServiceName = NSFileProviderServiceName("local.mydrive.control"
     func keepDownloaded(_ identifiers: [String], reply: @escaping (NSError?) -> Void)
     func freeUpSpace(_ identifiers: [String], reply: @escaping (Int, [String], NSError?) -> Void)
     func freeUpAllSpace(reply: @escaping (Int, [String], NSError?) -> Void)
+    func prepareForRemoval(reply: @escaping (Int, [String], NSError?) -> Void)
 }

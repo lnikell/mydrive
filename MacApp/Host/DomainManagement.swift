@@ -134,32 +134,34 @@ struct ConnectionRemoval {
         throw NSError(domain: failure.domain, code: failure.code, userInfo: details)
     }
 
-    /// Explicit OS removal preserves unsynced work and removes clean downloads.
+    private func prepareForRemoval() async throws -> [String] {
+        // Large caches stream with bounded pages/native waits. If this transport
+        // ceiling expires, preparation fails and the domain stays available.
+        let result: (Int, [String], NSError?) = try await control(timeout: 30 * 60) { proxy, complete in
+            proxy.prepareForRemoval { @Sendable count, retained, error in
+                complete(.success((count, retained, error)))
+            }
+        }
+        return try DomainRemovalPreparation.cacheWarnings(retained: result.1, failure: result.2)
+    }
+
+    /// Best-effort OS eviction precedes removal, which always preserves at least
+    /// dirty work and may preserve additional downloads at macOS's discretion.
     /// Forget provider-owned development credentials before its endpoint is lost;
     /// host configuration is removed after File Provider confirms success.
     func remove() async throws -> ConnectionRemoval {
         try Task.checkCancellation()
-        var failures: [String] = []
-        #if MYDRIVE_DEVELOPMENT
-        if AppStorage.isDevelopmentStorage {
-            do { try await forgetDevelopmentCredential() }
-            catch { failures.append("Provider development credentials: \(error.localizedDescription)") }
-        }
-        #endif
-        let preserved: URL?
-        do {
-            try Task.checkCancellation()
-            preserved = try await NSFileProviderManager.remove(domain, mode: .preserveDirtyUserData)
-        } catch {
-            guard !failures.isEmpty else { throw error }
-            let failure = error as NSError
-            var details = failure.userInfo
-            details[NSLocalizedDescriptionKey] = failure.localizedDescription +
-                "\nCredential cleanup also needs attention: " + failures.joined(separator: "\n")
-            details[NSUnderlyingErrorKey] = failure
-            details["MyDriveCleanupFailures"] = failures
-            throw NSError(domain: failure.domain, code: failure.code, userInfo: details)
-        }
+        let result = try await DomainRemovalPreparation.run(prepareCache: {
+            try await self.prepareForRemoval()
+        }, forgetCredential: {
+            #if MYDRIVE_DEVELOPMENT
+            if AppStorage.isDevelopmentStorage { try await self.forgetDevelopmentCredential() }
+            #endif
+        }, removeDomain: {
+            try await NSFileProviderManager.remove(self.domain, mode: .preserveDirtyUserData)
+        })
+        let preserved = result.preservedURL
+        var failures = result.warnings
         // OS removal has already succeeded. Cleanup failures must never hide
         // the URL of pending local work that macOS chose to preserve.
         let store = Result { try AppStorage.connectionStore() }
@@ -187,10 +189,11 @@ struct ConnectionRemoval {
     }
 
     private func control<Value: Sendable>(
+        timeout: TimeInterval = 120,
         request: @escaping @MainActor @Sendable (DomainControlProtocol, @escaping @Sendable (Result<Value, Error>) -> Void) -> Void
     ) async throws -> Value {
         guard let manager = NSFileProviderManager(for: domain) else { throw SMBClientError.invalidResponse }
-        let operation = DomainControlOperation<Value>()
+        let operation = DomainControlOperation<Value>(timeout: timeout)
         return try await operation.run { [weak operation] in
             do {
                 guard let service = try await manager.service(named: domainControlServiceName, for: .rootContainer) else {

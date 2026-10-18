@@ -5,6 +5,8 @@ import MyDriveCore
 struct EvictionReport: Sendable {
     let completed: Int
     let retained: [String]
+    // Unlike individual retained leaves, failure means the pass was incomplete.
+    // Removal must leave the connection available rather than skip unseen items.
     let failure: (any Error)?
 }
 
@@ -394,7 +396,7 @@ actor DomainCoordinator {
         var messages: [String] = []
         let enumerator = manager.enumeratorForMaterializedItems()
         defer { enumerator.invalidate() }
-        var page = NSFileProviderPage(NSFileProviderPage.initialPageSortedByName as Data)
+        var page = MaterializedPage.initialPage
         do {
             repeat {
                 try checkActive()
@@ -439,6 +441,40 @@ actor DomainCoordinator {
             messages.append("\(retained - messages.count) additional files retained.")
         }
         return EvictionReport(completed: evicted, retained: messages, failure: nil)
+    }
+
+    /// Uses only native cache metadata and OS eviction. Writes may still be
+    /// pending: their protection comes from macOS, never from a clean-state guess.
+    func prepareForRemoval() async throws -> EvictionReport {
+        try beginOfflinePolicyChange()
+        defer { changingOfflinePolicy = false }
+        let pass = RemovalEviction()
+        let enumerator = manager.enumeratorForMaterializedItems()
+        defer { enumerator.invalidate() }
+        return try await pass.run(preparePolicy: {
+            try await pass.clearSelections(in: self.catalog, checkActive: { try await self.checkActive() })
+            try self.checkActive()
+            try await RemovalEvictionRequest.run(until: pass.requestDeadline) { finish in
+                self.manager.signalEnumerator(for: .workingSet) { @Sendable error in finish(error) }
+            }
+        }, checkActive: { try self.checkActive() }, readPage: { page, remaining in
+            try await MaterializedPage.read(from: enumerator, startingAt: page, timeout: remaining)
+        }, evict: { identifier in
+            let id = ProviderItem.catalogID(NSFileProviderItemIdentifier(identifier))
+            return try await pass.evict(isKeptDownloaded: {
+                guard try await self.catalog.item(id: id) != nil else { return false }
+                return try await self.catalog.offlinePolicy(for: id) == .keepAvailable
+            }, checkActive: { try await self.checkActive() }, attempt: { deadline in
+                try await self.evictForRemoval(identifier: identifier, deadline: deadline)
+            })
+        })
+    }
+
+    private func evictForRemoval(identifier: String, deadline: ContinuousClock.Instant) async throws {
+        try checkActive()
+        try await RemovalEvictionRequest.run(until: deadline) { finish in
+            manager.evictItem(identifier: NSFileProviderItemIdentifier(identifier)) { @Sendable error in finish(error) }
+        }
     }
 
     private func providerItem(_ model: CatalogItem) async throws -> ProviderItem {

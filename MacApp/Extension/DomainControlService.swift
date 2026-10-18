@@ -8,12 +8,14 @@ final class DomainControlService: NSObject, NSFileProviderServiceSource, NSXPCLi
     var isRestricted: Bool { true }
 
     private let listener = NSXPCListener.anonymous()
-    private let control: DomainControl
+    private let coordinator: DomainCoordinator
+    private let tasks = ProviderTasks()
     private let lock = NSLock()
     private var connections: [ObjectIdentifier: NSXPCConnection] = [:]
+    private var closed = false
 
     init(coordinator: DomainCoordinator) {
-        control = DomainControl(coordinator: coordinator)
+        self.coordinator = coordinator
         super.init()
         listener.delegate = self
         listener.resume()
@@ -23,10 +25,15 @@ final class DomainControlService: NSObject, NSFileProviderServiceSource, NSXPCLi
 
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {
         let identifier = ObjectIdentifier(connection)
+        let scope = tasks.makeScope()
         connection.exportedInterface = NSXPCInterface(with: DomainControlProtocol.self)
-        connection.exportedObject = control
-        connection.invalidationHandler = { @Sendable [weak self] in self?.remove(identifier) }
+        connection.exportedObject = DomainControl(coordinator: coordinator, tasks: scope)
+        connection.invalidationHandler = { @Sendable [weak self] in
+            scope.invalidate()
+            self?.remove(identifier)
+        }
         lock.lock()
+        guard !closed else { lock.unlock(); scope.invalidate(); return false }
         connections[identifier] = connection
         lock.unlock()
         connection.resume()
@@ -34,12 +41,13 @@ final class DomainControlService: NSObject, NSFileProviderServiceSource, NSXPCLi
     }
 
     func invalidate() -> [Task<Void, Never>] {
-        listener.invalidate()
-        let pending = control.invalidate()
         lock.lock()
+        closed = true
         let active = Array(connections.values)
         connections.removeAll()
         lock.unlock()
+        listener.invalidate()
+        let pending = tasks.invalidate()
         active.forEach { $0.invalidate() }
         return pending
     }
@@ -53,10 +61,12 @@ final class DomainControlService: NSObject, NSFileProviderServiceSource, NSXPCLi
 
 private final class DomainControl: NSObject, DomainControlProtocol, @unchecked Sendable {
     private let coordinator: DomainCoordinator
-    private let tasks = ProviderTasks()
+    private let tasks: ProviderTasks.Scope
 
-    init(coordinator: DomainCoordinator) { self.coordinator = coordinator }
-    func invalidate() -> [Task<Void, Never>] { tasks.invalidate() }
+    init(coordinator: DomainCoordinator, tasks: ProviderTasks.Scope) {
+        self.coordinator = coordinator
+        self.tasks = tasks
+    }
 
     #if MYDRIVE_DEVELOPMENT
     func useDevelopmentCredential(_ password: String, reply: @escaping (NSError?) -> Void) {
@@ -114,6 +124,18 @@ private final class DomainControl: NSObject, DomainControlProtocol, @unchecked S
 
     func freeUpAllSpace(reply: @escaping (Int, [String], NSError?) -> Void) {
         free(nil, reply: reply)
+    }
+
+    func prepareForRemoval(reply: @escaping (Int, [String], NSError?) -> Void) {
+        let callback = ProviderCallback(reply)
+        _ = tasks.run { [coordinator] _ in
+            do {
+                let report = try await coordinator.prepareForRemoval()
+                callback.value(report.completed, report.retained, report.failure.map { ProviderErrors.translate($0) as NSError })
+            } catch {
+                callback.value(0, [], ProviderErrors.translate(error) as NSError)
+            }
+        }
     }
 
     private func free(_ identifiers: [String]?, reply: @escaping (Int, [String], NSError?) -> Void) {

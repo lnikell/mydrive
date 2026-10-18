@@ -1,16 +1,40 @@
 import Foundation
 import FileProvider
+import UniformTypeIdentifiers
 
 /// Enumerate macOS's cache rather than scanning the NAS merely to free space.
 /// Only one bounded page of identifiers is retained at a time.
 final class MaterializedPage: NSObject, NSFileProviderEnumerationObserver, @unchecked Sendable {
+    // Materialized-set enumeration requires empty Data, not the initial sorting
+    // tokens used for the provider's ordinary directory enumerators.
+    static var initialPage: NSFileProviderPage { NSFileProviderPage(Data()) }
+
+    struct Item: Sendable {
+        enum Kind: Equatable, Sendable { case leaf, container, unknown }
+        let identifier: String
+        let kind: Kind
+
+        init(identifier: String, kind: Kind) { self.identifier = identifier; self.kind = kind }
+
+        init(_ item: any NSFileProviderItem) {
+            identifier = item.itemIdentifier.rawValue
+            // Native representation decides eligibility. A logical package leaf
+            // can be backed by a remote directory; no Catalog kind is consulted.
+            guard let type = item.contentType, !type.isDynamic else { kind = .unknown; return }
+            if type.conforms(to: .folder) { kind = .container }
+            else if type.conforms(to: .package) || !type.conforms(to: .directory) { kind = .leaf }
+            else { kind = .unknown }
+        }
+    }
+
     struct ResultPage: Sendable {
-        let identifiers: [String]
+        let items: [Item]
         let next: NSFileProviderPage?
+        var identifiers: [String] { items.map(\.identifier) }
     }
 
     private let lock = NSLock()
-    private var identifiers: [String] = []
+    private var items: [Item] = []
     private var outcome: Result<ResultPage, Error>?
     private var continuation: CheckedContinuation<ResultPage, any Error>?
     var suggestedPageSize: Int { 128 }
@@ -44,18 +68,18 @@ final class MaterializedPage: NSObject, NSFileProviderEnumerationObserver, @unch
         lock.lock()
         guard outcome == nil else { lock.unlock(); return }
         // Apple permits at most 100 times the observer's suggested page size.
-        guard identifiers.count + updatedItems.count <= suggestedPageSize * 100 else {
+        guard items.count + updatedItems.count <= suggestedPageSize * 100 else {
             lock.unlock()
             finish(.failure(CocoaError(.fileReadCorruptFile)))
             return
         }
-        identifiers.append(contentsOf: updatedItems.map { $0.itemIdentifier.rawValue })
+        items.append(contentsOf: updatedItems.map(Item.init))
         lock.unlock()
     }
 
     func finishEnumerating(upTo nextPage: NSFileProviderPage?) {
         lock.lock()
-        let result = ResultPage(identifiers: identifiers, next: nextPage)
+        let result = ResultPage(items: items, next: nextPage)
         lock.unlock()
         finish(.success(result))
     }
@@ -82,7 +106,7 @@ final class MaterializedPage: NSObject, NSFileProviderEnumerationObserver, @unch
         outcome = result
         let waiting = continuation
         continuation = nil
-        identifiers.removeAll()
+        items.removeAll()
         lock.unlock()
         waiting?.resume(with: result)
     }
