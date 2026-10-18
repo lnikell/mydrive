@@ -2,15 +2,9 @@
 //! Unicode sequence is not evidence of the stored filename. Never casefold or
 //! normalize a caller's names to invent that evidence.
 use super::{Command, Entry, Error, Handle, Open, Result};
-use smb2::{
-    msg::{
-        directory_info,
-        query_directory::{
-            FileInformationClass, QueryDirectoryFlags, QueryDirectoryRequest,
-            QueryDirectoryResponse,
-        },
-    },
-    pack::{ReadCursor, Unpack},
+use smb2::msg::{
+    directory_info,
+    query_directory::{FileInformationClass, QueryDirectoryFlags, QueryDirectoryRequest},
 };
 
 impl Handle {
@@ -44,11 +38,7 @@ impl Handle {
                     },
                 )
                 .await?;
-            let bytes =
-                QueryDirectoryResponse::unpack(&mut ReadCursor::new(&frame.body))?.output_buffer;
-            if bytes.len() > 64 * 1024 {
-                return Err(Error::Smb(smb2::ErrorKind::InvalidData));
-            }
+            let bytes = crate::held_metadata::query_buffer(&frame.body, 64 * 1024)?;
             let entries = directory_info::parse_entries(
                 FileInformationClass::FileIdBothDirectoryInformation,
                 &bytes,
@@ -96,6 +86,17 @@ fn valid_name(name: String) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_wire::{connection, reply};
+    use smb2::{
+        msg::{
+            create::{CreateAction, CreateResponse},
+            header::Header,
+            query_directory::QueryDirectoryResponse,
+        },
+        pack::{FileTime, Pack, ReadCursor, Unpack, WriteCursor},
+        types::{flags::HeaderFlags, status::NtStatus, FileId, OplockLevel, TreeId},
+    };
+
     #[test]
     fn actual_name_preserves_case_and_unicode_bytes() {
         for name in ["FILE.txt", "cafe\u{301}.txt", "café.txt"] {
@@ -114,15 +115,91 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_normalized_name_falls_back_to_server_directory_spelling() {
-        use crate::test_wire::{connection, reply};
-        use smb2::{
-            msg::{
-                create::{CreateAction, CreateResponse},
-                header::Header,
-            },
-            pack::{FileTime, Pack, WriteCursor},
-            types::{flags::HeaderFlags, status::NtStatus, FileId, OplockLevel, TreeId},
-        };
+        assert_eq!(
+            fallback(&QueryDirectoryResponse {
+                output_buffer: entries(),
+            })
+            .await
+            .unwrap(),
+            "file.txt"
+        );
+    }
+
+    struct Envelope {
+        offset: u16,
+        declared: u32,
+        padding: usize,
+        buffer: Vec<u8>,
+    }
+    impl Envelope {
+        fn new(offset: u16, buffer: Vec<u8>) -> Self {
+            Self {
+                offset,
+                declared: buffer.len() as u32,
+                padding: 0,
+                buffer,
+            }
+        }
+    }
+    impl Pack for Envelope {
+        fn pack(&self, cursor: &mut WriteCursor) {
+            cursor.write_u16_le(9);
+            cursor.write_u16_le(self.offset);
+            cursor.write_u32_le(self.declared);
+            cursor.write_bytes(&vec![0; self.padding]);
+            cursor.write_bytes(&self.buffer);
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_fallback_refuses_header_offsets_after_closing_both_handles() {
+        for offset in [0, 63, 64, 71] {
+            let result = fallback(&Envelope::new(offset, entries())).await;
+            assert!(
+                matches!(result, Err(Error::Smb(smb2::ErrorKind::InvalidData))),
+                "canonical fallback accepted header offset {offset}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_fallback_keeps_padding_and_requested_boundaries_compatible() {
+        let mut boundary = entries();
+        boundary.resize(64 * 1024, 0);
+        let mut padded = Envelope::new(80, entries());
+        padded.padding = 8;
+        for envelope in [
+            Envelope::new(72, entries()),
+            padded,
+            Envelope::new(72, boundary),
+        ] {
+            assert_eq!(fallback(&envelope).await.unwrap(), "file.txt");
+        }
+        let mut overlength = entries();
+        overlength.resize(64 * 1024 + 1, 0);
+        let mut truncated = Envelope::new(72, entries());
+        truncated.declared += 1;
+        let mut huge = Envelope::new(72, entries());
+        huge.declared = u32::MAX;
+        for envelope in [Envelope::new(72, overlength), truncated, huge] {
+            assert!(fallback(&envelope).await.is_err());
+        }
+    }
+
+    fn entries() -> Vec<u8> {
+        directory_info::pack_entries(
+            FileInformationClass::FileIdBothDirectoryInformation,
+            &[directory_info::DirectoryInfoEntry {
+                file_id: Some(9),
+                creation_time: FileTime(1),
+                file_name: "file.txt".into(),
+                ..Default::default()
+            }],
+        )
+        .unwrap()
+    }
+
+    async fn fallback(response: &impl Pack) -> Result<String> {
         let (connection, mock) = connection().await;
         let mut header = Header::new_request(Command::QueryInfo);
         header.flags = HeaderFlags::new(HeaderFlags::SERVER_TO_REDIR);
@@ -152,23 +229,7 @@ mod tests {
                 create_contexts: vec![],
             },
         );
-        let entries = directory_info::pack_entries(
-            FileInformationClass::FileIdBothDirectoryInformation,
-            &[directory_info::DirectoryInfoEntry {
-                file_id: Some(9),
-                creation_time: FileTime(1),
-                file_name: "file.txt".into(),
-                ..Default::default()
-            }],
-        )
-        .unwrap();
-        reply(
-            &mock,
-            Command::QueryDirectory,
-            &QueryDirectoryResponse {
-                output_buffer: entries,
-            },
-        );
+        reply(&mock, Command::QueryDirectory, response);
         reply(&mock, Command::Close, &crate::test_wire::Closed);
         reply(&mock, Command::Close, &crate::test_wire::Closed);
         let handle = Handle {
@@ -191,15 +252,25 @@ mod tests {
             changed_filetime: 4,
             attributes: 32,
         };
-        assert_eq!(
-            handle
-                .canonical_name("parent/FILE.txt", &expected)
-                .await
-                .unwrap(),
-            "file.txt"
-        );
+        let result = handle.canonical_name("parent/FILE.txt", &expected).await;
         handle.close().await.unwrap();
+        let sent = mock.sent_messages();
+        let commands: Vec<_> = sent
+            .iter()
+            .map(|bytes| Header::unpack(&mut ReadCursor::new(bytes)).unwrap().command)
+            .collect();
+        assert_eq!(
+            commands,
+            [
+                Command::QueryInfo,
+                Command::Create,
+                Command::QueryDirectory,
+                Command::Close,
+                Command::Close
+            ]
+        );
         mock.assert_fully_consumed();
         mock.close();
+        result
     }
 }
