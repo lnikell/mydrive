@@ -22,6 +22,56 @@ pub struct Payload {
     pub sha256: String,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum SaveContract {
+    #[serde(rename = "acknowledged_smb_v2")]
+    AcknowledgedSmbV2,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContentEvidenceKind {
+    SmbAcknowledged,
+    RemoteSha256,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(try_from = "EvidenceFields")]
+pub struct ContentEvidence {
+    pub kind: ContentEvidenceKind,
+    pub bytes: u64,
+    pub sha256: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvidenceFields {
+    kind: ContentEvidenceKind,
+    bytes: u64,
+    sha256: String,
+}
+impl TryFrom<EvidenceFields> for ContentEvidence {
+    type Error = &'static str;
+    fn try_from(value: EvidenceFields) -> std::result::Result<Self, Self::Error> {
+        if value.bytes > i64::MAX as u64 || !valid_hash(&value.sha256) {
+            return Err("invalid content evidence");
+        }
+        Ok(Self {
+            kind: value.kind,
+            bytes: value.bytes,
+            sha256: value.sha256,
+        })
+    }
+}
+impl ContentEvidence {
+    pub(crate) fn new(kind: ContentEvidenceKind, payload: &Payload) -> Self {
+        Self {
+            kind,
+            bytes: payload.bytes,
+            sha256: payload.sha256.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
@@ -34,6 +84,8 @@ pub struct Artifact {
     pub phase: StagePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security_sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_contract: Option<SaveContract>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -94,6 +146,8 @@ pub struct MutationRequest {
     pub expected: Option<Entry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub payload: Option<Payload>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub save_contract: Option<SaveContract>,
     #[serde(default)]
     pub receipt: Receipt,
 }
@@ -114,6 +168,10 @@ pub struct MutationResult {
     pub code: &'static str,
     pub entry: Option<Entry>,
     pub sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub save_contract: Option<SaveContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_evidence: Option<ContentEvidence>,
     pub cleanup_pending: bool,
     #[serde(flatten)]
     pub receipt: Receipt,
@@ -151,6 +209,11 @@ impl MutationRequest {
             self.kind,
             MutationKind::CreateFile | MutationKind::ReplaceFile
         );
+        if self.save_contract.is_some() && !uploads {
+            return Err(Error::Input(
+                "save contract requires a file payload operation",
+            ));
+        }
         if (self.receipt.staged.is_some() && !creates && self.kind != MutationKind::ReplaceFile)
             || (self.receipt.archived.is_some()
                 && !matches!(self.kind, MutationKind::ReplaceFile | MutationKind::Delete))
@@ -217,6 +280,13 @@ impl MutationRequest {
         ] {
             if let Some(artifact) = artifact {
                 if artifact.path != self.sidecar(suffix)
+                    || artifact.save_contract
+                        != if suffix == "stage" {
+                            self.save_contract
+                        } else {
+                            None
+                        }
+                    || (artifact.save_contract.is_some() && artifact.phase != StagePhase::Allocated)
                     || artifact.entry.index_number.is_none_or(|id| id == 0)
                     || artifact.entry.created_filetime == 0
                     || artifact
@@ -320,3 +390,7 @@ pub(crate) fn canonical_uuid(value: &str) -> bool {
         })
         && value.bytes().any(|byte| byte != b'0' && byte != b'-')
 }
+
+#[cfg(test)]
+#[path = "mutation_contract_tests.rs"]
+mod contract_tests;

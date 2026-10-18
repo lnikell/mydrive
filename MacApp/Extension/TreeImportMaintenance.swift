@@ -10,7 +10,10 @@ extension ProviderTreeImport {
               bound.operation.state == .completed,
               let root = try mutations.staging.load(status.key),
               let retained = root.treeImport, retained.layoutVersion == 2,
-              retained.tree == status.tree else { throw CocoaError(.fileReadCorruptFile) }
+              retained.tree == status.tree, retained.saveContract == status.saveContract else { throw CocoaError(.fileReadCorruptFile) }
+        guard let result = plan.steps.first?.result,
+              let completed = try await mutations.catalog.mutationResult(key: plan.key),
+              result.content_evidence == completed.contentEvidence else { throw CocoaError(.fileReadCorruptFile) }
         let snapshot = try LocalTreeSnapshot.load(retained.tree, in: mutations.staging)
         try qualify(plan, step: bound.step, intent: bound.operation.intent,
             parent: bound.parentIdentity, destinationParent: bound.destinationParentIdentity,

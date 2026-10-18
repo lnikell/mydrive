@@ -41,6 +41,8 @@ actor MutationPeer {
     private(set) var publishedCount = 0
     private(set) var calls = 0
     private(set) var mutationRequests: [SMBMutationRequest] = []
+    private(set) var reconciliationRoles: [Bool] = []
+    var cancelAfterPublished: CancellationLatch?
     var loseNextPublishedReply = false
     var cancelAfterPrepared: CancellationLatch?
     var removeAfterPublish: String?
@@ -67,6 +69,7 @@ actor MutationPeer {
         allocatedMode = true; interruptAllocatedWrite = interruptWrite; lostAllocationReplies = lostReplies
     }
     func loseReply() { loseNextPublishedReply = true }
+    func cancelAfterPublication(_ latch: CancellationLatch) { cancelAfterPublished = latch }
     func failNextMutation(code: String) { nextFailureCode = code }
     func cancelAfterStage(_ latch: CancellationLatch?) { cancelAfterPrepared = latch }
     func stat(_ path: String) -> SMBEntry? { path.isEmpty ? rootOverride ?? Self.rootEntry : entries[path] }
@@ -92,12 +95,17 @@ actor MutationPeer {
                 _ progress: (@Sendable (Int64) -> Void)?) async throws -> SMBMutationResult {
         calls += 1
         mutationRequests.append(request)
+        reconciliationRoles.append(reconcile)
         var receipt = request.receipt
         func result(_ outcome: SMBMutationResult.Outcome, _ code: String,
                     entry: SMBEntry? = nil, hash: String? = nil) -> SMBMutationResult {
             SMBMutationResult(operation_id: request.operation_id, outcome: outcome, code: code,
-                              entry: entry, sha256: hash,
-                              cleanup_pending: receipt.staged != nil || receipt.archived != nil, receipt: receipt)
+                              entry: entry, sha256: request.save_contract == nil ? hash : nil,
+                              cleanup_pending: receipt.staged != nil || receipt.archived != nil, receipt: receipt,
+                              saveContract: request.save_contract,
+                              contentEvidence: request.save_contract != nil && outcome == .committed ? request.payload.map {
+                                  .init(kind: reconcile ? .remoteSHA256 : .smbAcknowledged, bytes: $0.bytes, sha256: $0.sha256)
+                              } : nil)
         }
         if let code = nextFailureCode { nextFailureCode = nil; return result(.notApplied, code) }
         func parentMatches(_ path: String, _ identity: SMBMutationRequest.ParentIdentity?) -> Bool {
@@ -115,7 +123,7 @@ actor MutationPeer {
         }
         switch request.kind {
         case .createFile, .createDirectory, .replaceFile:
-            let allocates = allocatedMode && request.kind != .createDirectory
+            let allocates = (allocatedMode || request.save_contract != nil) && request.kind != .createDirectory
             if request.kind == .replaceFile && replaceParentAfterConflict {
                 _ = seed(path: request.path, bytes: Data("concurrent external edit".utf8))
                 replaceParentAfterConflict = false
@@ -123,6 +131,13 @@ actor MutationPeer {
                 return result(.conflict, "changed")
             }
             if let current = entries[request.path], current.index_number == receipt.staged?.entry.index_number {
+                if request.save_contract != nil {
+                    guard reconcile else { return result(.uncertain, "reconcile_required") }
+                    guard current.objectIdentity == receipt.staged?.entry.objectIdentity,
+                          current.bytes == request.payload?.bytes, hashes[request.path] == request.payload?.sha256 else {
+                        return result(.uncertain, "changed")
+                    }
+                }
                 receipt.staged = nil
                 return result(.committed, "committed", entry: current, hash: request.payload?.sha256)
             }
@@ -142,7 +157,7 @@ actor MutationPeer {
                 let entry = seed(path: path, bytes: allocates ? Data() : bytes, directory: request.kind == .createDirectory)
                 receipt.staged = .init(path: path, entry: entry, cleanup_safe: true,
                     phase: allocates ? .allocated : .prepared,
-                    security_sha256: allocates ? String(repeating: "a", count: 64) : nil)
+                    security_sha256: allocates ? String(repeating: "a", count: 64) : nil, saveContract: request.save_contract)
                 stagedCount += 1
                 if allocates, lostAllocationReplies > 0 { lostAllocationReplies -= 1; throw SMBClientError.serverUnreachable }
                 if !allocates { progress?(Int64(bytes.count)) }
@@ -150,7 +165,7 @@ actor MutationPeer {
                 if replaceParentAfterPrepared { replaceParentAfterPrepared = false; replaceRoot() }
                 return result(.notApplied, allocates ? "allocated" : "prepared")
             }
-            guard let stage = receipt.staged, let staged = entries[stage.path] else {
+            guard let stage = receipt.staged, var staged = entries[stage.path] else {
                 return result(.uncertain, "unverified_stage")
             }
             if stage.phase == .allocated {
@@ -165,9 +180,12 @@ actor MutationPeer {
                 entries[stage.path] = entry; hashes[stage.path] = Self.hash(written); contents[stage.path] = written
                 progress?(Int64(written.count))
                 if interrupted { throw SMBClientError.serverUnreachable }
-                receipt.staged = .init(path: stage.path, entry: entry, cleanup_safe: true,
-                    phase: .prepared, security_sha256: stage.security_sha256)
-                return result(.notApplied, "prepared")
+                if request.save_contract == nil {
+                    receipt.staged = .init(path: stage.path, entry: entry, cleanup_safe: true,
+                        phase: .prepared, security_sha256: stage.security_sha256)
+                    return result(.notApplied, "prepared")
+                }
+                staged = entry
             }
             if request.kind == .replaceFile, let original = entries[request.path] {
                 let path = request.sidecar("backup")
@@ -176,6 +194,7 @@ actor MutationPeer {
             }
             let final = move(stage.path, to: request.path, entry: staged)
             receipt.staged = nil; publishedCount += 1
+            if let latch = cancelAfterPublished { cancelAfterPublished = nil; await latch.set(true) }
             if let path = removeAfterPublish { entries.removeValue(forKey: path); hashes.removeValue(forKey: path); removeAfterPublish = nil }
             if loseNextPublishedReply {
                 loseNextPublishedReply = false

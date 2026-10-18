@@ -10,8 +10,9 @@ extension Catalog {
             try requireImportLayout(record)
             guard record.status.phase == .frozen || record.status.phase == .published else { throw CatalogError.invalidTransition }
             switch update {
-            case .committed(let step, let childKey, let entry, let sha256):
-                try recordImportCommit(record, step: step, childKey: childKey, entry: entry, sha256: sha256)
+            case .committed(let step, let childKey, let entry, let sha256, let evidence):
+                try recordImportCommit(record, step: step, childKey: childKey, entry: entry,
+                                       sha256: sha256, contentEvidence: evidence)
             case .fileVerified(let id, let entry, let sha256):
                 guard record.status.phase == .frozen, let node = try importNode(key, id: id),
                       let payload = node.spec.payload, let placed = node.placed,
@@ -44,7 +45,7 @@ extension Catalog {
     }
 
     func recordImportCommit(_ record: ImportRecord, step: TreeImportStep, childKey: UUID,
-                            entry: RemoteEntry, sha256: String?) throws {
+                            entry: RemoteEntry, sha256: String?, contentEvidence: MutationContentEvidence?) throws {
         let status = record.status
         let node: ImportNode?
         let expectedKey: UUID
@@ -61,17 +62,22 @@ extension Catalog {
             expectedKey = step == .create ? found.createKey : found.placeKey
         }
         guard childKey == expectedKey, let operation = try operation(key: childKey) else { throw CatalogError.invalidTransition }
+        let work = try importMutationWork(record, step: step, node: node)
+        guard case .mutation(_, let expected, _, _) = work,
+              Self.exact(expected.requestFingerprint, operation.intent.requestFingerprint) else { throw CatalogError.idempotencyConflict }
+        try Self.validateContentEvidence(contentEvidence, intent: operation.intent)
+        if operation.intent.saveContract != nil, sha256 != nil { throw CatalogError.invalidEntry }
         if let receipt = try mutationResult(key: childKey) {
             guard receipt.items.count == 1, Self.exactEntry(receipt.items[0].entry, entry),
-                  (step != .create || node?.spec.payload?.sha256 == sha256) else { throw CatalogError.idempotencyConflict }
+                  receipt.contentEvidence == contentEvidence,
+                  (step != .create || operation.intent.saveContract != nil || node?.spec.payload?.sha256 == sha256) else {
+                throw CatalogError.idempotencyConflict
+            }
             return
         }
         guard status.phase == .frozen, operation.state == .executing || operation.state == .uncertain else {
             throw CatalogError.invalidTransition
         }
-        let work = try importMutationWork(record, step: step, node: node)
-        guard case .mutation(_, let expected, _, _) = work,
-              Self.exact(expected.requestFingerprint, operation.intent.requestFingerprint) else { throw CatalogError.idempotencyConflict }
         switch step {
         case .arena:
             try validateImportObservation(entry, kind: .directory, name: status.scope.arenaName)
@@ -85,7 +91,8 @@ extension Catalog {
             guard let node else { throw CatalogError.invalidTransition }
             try validateImportObservation(entry, kind: node.spec.kind, name: Self.treeName(node.scratchPath))
             if let payload = node.spec.payload {
-                guard Self.exact(sha256 ?? "", payload.sha256), entry.size == payload.size else { throw CatalogError.invalidEntry }
+                guard (operation.intent.saveContract != nil || Self.exact(sha256 ?? "", payload.sha256)),
+                      entry.size == payload.size else { throw CatalogError.invalidEntry }
             } else if sha256 != nil { throw CatalogError.invalidEntry }
             try database.execute("UPDATE tree_import_nodes SET created_entry = ? WHERE operation_key = ? AND path = ?",
                                  [.text(try Self.treeEncode(entry)), .text(status.key.uuidString), .text(node.spec.path)])
@@ -106,7 +113,9 @@ extension Catalog {
         let receiptItem = CatalogItem(id: operation.intent.itemID, parentID: importReceiptParent(operation.intent), entry: entry)
         var fingerprint = MutationFingerprint()
         fingerprint.add("mydrive-tree-receipt-v1"); fingerprint.add(step.rawValue); fingerprint.add(entry); fingerprint.add(sha256)
-        try storeMutationResult(.init(items: [receiptItem], tombstones: [], generation: try generation()),
+        fingerprint.addContentEvidence(contentEvidence)
+        try storeMutationResult(.init(items: [receiptItem], tombstones: [], generation: try generation(),
+                                      contentEvidence: contentEvidence),
                                 key: childKey, fingerprint: fingerprint.digest)
     }
 

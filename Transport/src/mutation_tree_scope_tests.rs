@@ -327,6 +327,7 @@ async fn descendant_place_keeps_root_and_actual_parent_reserved_and_rejects_repl
 fn fence_refusal_retains_receipts_and_arena_cleanup_is_empty_only_exact_identity() {
     let mut request = intent("create_directory", &scratch());
     request.receipt.staged = Some(mutation::Artifact {
+        save_contract: None,
         path: request.sidecar("stage"),
         entry: Entry {
             name: "stage".into(),

@@ -65,6 +65,7 @@ fn security() -> Vec<u8> {
 }
 fn request() -> MutationRequest {
     MutationRequest {
+        save_contract: None,
         operation_id: "11111111-2222-4333-8444-555555555555".into(),
         kind: mutation::MutationKind::CreateFile,
         path: "file".into(),
@@ -96,6 +97,7 @@ fn io(connection: Connection) -> MutationIO {
 }
 fn allocation(request: &MutationRequest) -> Artifact {
     Artifact {
+        save_contract: None,
         path: request.sidecar("stage"),
         entry: Entry {
             name: "stage".into(),

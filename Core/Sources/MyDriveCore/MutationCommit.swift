@@ -14,16 +14,18 @@ extension Catalog {
     /// into memory. A repeated identical commit returns its original receipt.
     @discardableResult
     public func commitMutation(
-        key: UUID, upserts: [CatalogMutationItem], tombstones: [String]
+        key: UUID, upserts: [CatalogMutationItem], tombstones: [String],
+        contentEvidence: MutationContentEvidence? = nil
     ) throws -> MutationCommitResult {
         guard upserts.count <= 1_000, tombstones.count <= 1_000,
               !upserts.isEmpty || !tombstones.isEmpty else { throw CatalogError.invalidEntry }
-        let fingerprint = Self.commitFingerprint(upserts: upserts, tombstones: tombstones)
+        let fingerprint = Self.commitFingerprint(upserts: upserts, tombstones: tombstones, evidence: contentEvidence)
         return try database.transaction {
             guard let operation = try operation(key: key) else { throw CatalogError.invalidTransition }
             guard operation.intent.tree == nil, try importOwnerKey(key) == nil else {
                 throw CatalogError.invalidTransition
             }
+            try Self.validateContentEvidence(contentEvidence, intent: operation.intent)
             if let result = try mutationResult(key: key) {
                 let original = try database.scalarText(
                     "SELECT commit_fingerprint FROM operations WHERE idempotency_key = ?", [.text(key.uuidString)])
@@ -63,7 +65,7 @@ extension Catalog {
                 items: try upserts.map {
                     guard let item = try item(id: $0.id), !item.isDeleted else { throw CatalogError.invalidParent }
                     return item
-                }, tombstones: tombstones.sorted(), generation: try generation())
+                }, tombstones: tombstones.sorted(), generation: try generation(), contentEvidence: contentEvidence)
             try storeMutationResult(result, key: key, fingerprint: fingerprint)
             return result
         }
@@ -219,7 +221,8 @@ extension Catalog {
             """, ids.map(SQLValue.text))
     }
 
-    private static func commitFingerprint(upserts: [CatalogMutationItem], tombstones: [String]) -> String {
+    private static func commitFingerprint(upserts: [CatalogMutationItem], tombstones: [String],
+                                          evidence: MutationContentEvidence?) -> String {
         var fields = MutationFingerprint()
         fields.add("mydrive-commit-v1"); fields.add(String(upserts.count))
         for value in upserts.sorted(by: { $0.id < $1.id }) {
@@ -227,6 +230,7 @@ extension Catalog {
         }
         fields.add(String(tombstones.count))
         for id in tombstones.sorted() { fields.add(id) }
+        fields.addContentEvidence(evidence)
         return fields.digest
     }
 }

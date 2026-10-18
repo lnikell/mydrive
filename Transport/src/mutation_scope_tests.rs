@@ -259,6 +259,7 @@ async fn cancellation_stops_scope_reservation_before_opening_an_object() {
 fn refused_scope_preserves_durable_recovery_evidence_and_cleanup_scope() {
     let mut request = intent("selection/file", false);
     request.receipt.archived = Some(mutation::Artifact {
+        save_contract: None,
         path: request.sidecar("deleted"),
         entry: request.expected.clone().unwrap(),
         cleanup_safe: true,

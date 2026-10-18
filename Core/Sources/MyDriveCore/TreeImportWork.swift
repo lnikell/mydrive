@@ -109,7 +109,8 @@ extension Catalog {
                   let parentIdentity = parent.placed?.objectIdentity else { throw CatalogError.invalidTransition }
             let intent = JournalIntent(idempotencyKey: node.createKey, itemID: node.itemID, expectedVersion: nil,
                 action: .create(parentID: parent.itemID, name: Self.treeName(node.scratchPath), kind: node.spec.kind),
-                payload: node.spec.payload, destinationPath: node.scratchPath)
+                payload: node.spec.payload, destinationPath: node.scratchPath,
+                saveContract: node.spec.payload == nil ? nil : status.saveContract)
             return .mutation(step: step, intent: intent, parentIdentity: parentIdentity, destinationParentIdentity: nil)
         }
         if step == .place {

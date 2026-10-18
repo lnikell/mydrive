@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import unittest
 
 from nas_benchmark import BenchmarkError
-from nas_mutation_check import MutationTrial
+from nas_mutation_check import ACKNOWLEDGED_SAVE_CONTRACT, MutationTrial, confirmed_content
 
 
 class FakeRemote:
@@ -83,6 +83,9 @@ class FakeRemote:
         request = operation["request"]
         key, kind, path = request["operation_id"], request["kind"], request["path"]
         result = {"operation_id": key, "outcome": "committed", "code": "committed"}
+        contract = request.get("save_contract")
+        if contract is not None:
+            result["save_contract"] = contract
         parents = [(path.rpartition("/")[0], request.get("parent"))]
         if kind == "move":
             parents.append((request["destination"].rpartition("/")[0], request.get("destination_parent")))
@@ -93,15 +96,16 @@ class FakeRemote:
                 return self.result({**result, "outcome": "conflict", "code": "parent_changed"})
         if operation["type"] == "reconcile":
             # Require the exact receipt seen before publication, not final Entry.
-            if request.get("receipt", {}).get("staged") != self.prepared[key]:
+            origin = self.allocated[key] if contract else self.prepared[key]
+            if request.get("receipt", {}).get("staged") != origin:
                 raise BenchmarkError("replay guessed the prepared receipt")
             current = self.objects[path]
-            same = current["entry"]["index_number"] == self.prepared[key]["entry"]["index_number"]
+            same = current["entry"]["index_number"] == origin["entry"]["index_number"]
             result["outcome"] = "committed" if same else "conflict"
             self.reconciled.append(result["outcome"])
             if same:
                 result["entry"] = copy.deepcopy(current["entry"])
-                result["sha256"] = hashlib.sha256(current["body"]).hexdigest()
+                self.content_result(result, current["body"], contract, reconcile=True)
                 if self.fault == "replay_identity":
                     result["entry"]["index_number"] += 10000
             return self.result(result)
@@ -114,12 +118,16 @@ class FakeRemote:
                 phase = "prepared" if kind == "create_directory" else "allocated"
                 artifact = {"path": stage, "entry": copy.deepcopy(self.objects[stage]["entry"]),
                             "cleanup_safe": True, "phase": phase, "security_sha256": "a" * 64}
+                if contract:
+                    artifact["save_contract"] = contract
                 if phase == "allocated":
                     self.allocated[key] = copy.deepcopy(artifact)
                     if self.fault == "allocation_security":
                         artifact.pop("security_sha256")
                     elif self.fault == "allocation_nonempty":
                         artifact["entry"]["bytes"] = 1
+                    elif self.fault == "allocation_contract":
+                        artifact.pop("save_contract", None)
                 else:
                     self.prepared[key] = copy.deepcopy(artifact)
                 return self.result({**result, "outcome": "not_applied", "code": phase, "staged": artifact})
@@ -132,13 +140,16 @@ class FakeRemote:
                 self.objects[stage]["entry"]["changed_filetime"] += 1
                 artifact = {**self.allocated[key], "entry": copy.deepcopy(self.objects[stage]["entry"]), "phase": "prepared"}
                 self.prepared[key] = copy.deepcopy(artifact)
-                return self.result({**result, "outcome": "not_applied", "code": "prepared", "staged": artifact})
-            if request["receipt"]["staged"] != self.prepared[key]:
+                if not contract or self.fault == "v2_prepared":
+                    return self.result({**result, "outcome": "not_applied", "code": "prepared", "staged": artifact})
+            elif request["receipt"]["staged"] != self.prepared[key]:
                 raise BenchmarkError("continuation changed its stage receipt")
             if kind == "replace_file":
                 backup = path.rpartition("/")[0] + "/.mydrive-" + key + ".backup"
                 result["archived"] = {"path": backup, "entry": self.rename(path, backup), "cleanup_safe": True}
             result["entry"] = self.rename(stage, path)
+            if contract:
+                self.content_result(result, body, contract)
             return self.result(result)
         if kind == "move":
             result["entry"] = self.rename(path, request["destination"])
@@ -156,6 +167,31 @@ class FakeRemote:
             raise AssertionError("Unexpected mutation: " + kind)
         return self.result(result)
 
+    def content_result(self, result, body, contract, *, reconcile=False):
+        digest = hashlib.sha256(body).hexdigest()
+        if not contract:
+            result["sha256"] = digest
+            return
+        evidence = {"kind": "remote_sha256" if reconcile else "smb_acknowledged",
+                    "bytes": len(body), "sha256": digest}
+        result["content_evidence"] = evidence
+        if self.fault == "v2_wrong_role" and not reconcile:
+            evidence["kind"] = "remote_sha256"
+        if self.fault == "v2_reconcile_ack" and reconcile:
+            evidence["kind"] = "smb_acknowledged"
+        if self.fault == "v2_missing_echo":
+            result.pop("save_contract")
+        if self.fault == "v2_legacy_sha":
+            result["sha256"] = digest
+        if self.fault == "v2_extra_evidence":
+            evidence["trusted"] = True
+        if self.fault == "v2_wrong_creator":
+            result["entry"]["index_number"] += 10000
+        if self.fault == "v2_directory":
+            result["entry"]["directory"] = True
+        if self.fault == "v2_terminal_stage":
+            result["staged"] = copy.deepcopy(next(iter(self.allocated.values())))
+
 
 class MutationQualificationTests(unittest.TestCase):
     def setUp(self):
@@ -167,9 +203,10 @@ class MutationQualificationTests(unittest.TestCase):
     def tearDown(self):
         self.temporary.cleanup()
 
-    def trial(self, remote):
+    def trial(self, remote, *, acknowledged=False):
         return MutationTrial(remote, self.work, self.report,
-                             lambda: self.saves.append(copy.deepcopy(self.report)))
+                             lambda: self.saves.append(copy.deepcopy(self.report)),
+                             save_contract=ACKNOWLEDGED_SAVE_CONTRACT if acknowledged else None)
 
     def test_roundtrip_reconciles_actual_prepared_identity_then_obsolete_conflict(self):
         remote = FakeRemote()
@@ -246,6 +283,73 @@ class MutationQualificationTests(unittest.TestCase):
                 self.assertEqual(sum(kind == "mutate" for kind, _ in remote.calls), 1)
                 self.assertNotIn(remote.root + "/file", remote.objects)
                 self.assertTrue(remote.allocated)
+
+    def test_acknowledged_workflow_uses_original_allocated_origin_and_strict_replay(self):
+        remote = FakeRemote()
+        self.trial(remote, acknowledged=True).run()
+        self.assertEqual(self.report["status"], "passed")
+        self.assertEqual(remote.reconciled, ["committed", "conflict"])
+        self.assertEqual(remote.objects, {})
+        payload_requests = [op["request"] for kind, op in remote.calls
+                            if kind in ("mutate", "reconcile") and "payload" in op["request"]]
+        self.assertTrue(payload_requests)
+        self.assertTrue(all(request["save_contract"] == ACKNOWLEDGED_SAVE_CONTRACT for request in payload_requests))
+        namespace_requests = [op["request"] for kind, op in remote.calls
+                              if kind in ("mutate", "reconcile") and "payload" not in op["request"]]
+        self.assertTrue(all("save_contract" not in request for request in namespace_requests))
+        committed = next(row for row in self.report["commits"] if row["request"]["kind"] == "create_file")
+        self.assertEqual(committed["request"]["receipt"]["staged"], remote.allocated[committed["request"]["operation_id"]])
+        self.assertNotIn("staged", committed["result"])
+        self.assertNotIn("sha256", committed["result"])
+        self.assertEqual(committed["result"]["content_evidence"]["kind"], "smb_acknowledged")
+
+    def test_malformed_v2_success_retains_effect_before_any_read_or_cleanup(self):
+        for fault in ("v2_wrong_role", "v2_missing_echo", "v2_legacy_sha", "v2_extra_evidence",
+                      "v2_wrong_creator", "v2_terminal_stage", "v2_directory"):
+            with self.subTest(fault=fault):
+                remote = FakeRemote(fault)
+                trial = self.trial(remote, acknowledged=True)
+                remote.run("prepare")
+                with self.assertRaises(BenchmarkError):
+                    trial.apply(trial.request("create_file", "file", body=b"retain after malformed terminal"))
+                self.assertEqual(remote.objects[remote.root + "/file"]["body"], b"retain after malformed terminal")
+                self.assertFalse(any(kind in ("read", "cleanup", "reconcile") for kind, _ in remote.calls))
+
+    def test_reconcile_cannot_claim_ack_and_never_reaches_further_read_or_deletion(self):
+        remote = FakeRemote("v2_reconcile_ack")
+        with self.assertRaisesRegex(BenchmarkError, "actual role"):
+            self.trial(remote, acknowledged=True).run()
+        self.assertEqual(sum(kind == "read" for kind, _ in remote.calls), 1)
+        self.assertFalse(any(kind == "cleanup" or (kind == "mutate" and op["request"]["kind"] == "delete")
+                             for kind, op in remote.calls))
+        self.assertTrue(any(path.endswith("Edited — café.txt") for path in remote.objects))
+
+    def test_v2_cannot_relabel_unbound_allocation_or_receive_legacy_prepared_checkpoint(self):
+        for fault in ("allocation_contract", "v2_prepared"):
+            remote = FakeRemote(fault)
+            trial = self.trial(remote, acknowledged=True)
+            remote.run("prepare")
+            with self.subTest(fault=fault), self.assertRaises(BenchmarkError):
+                trial.apply(trial.request("create_file", "file", body=b"retain locally"))
+            self.assertNotIn(remote.root + "/file", remote.objects)
+            self.assertFalse(any(kind in ("read", "cleanup") for kind, _ in remote.calls))
+
+    def test_shared_proof_validator_has_exact_role_shape_and_legacy_semantics(self):
+        payload = {"bytes": 3, "sha256": "a" * 64}
+        legacy = {"outcome": "committed", "code": "committed", "entry": {"bytes": 3}, "sha256": "a" * 64}
+        self.assertTrue(confirmed_content(legacy, payload))
+        ack = {**legacy, "sha256": None, "save_contract": ACKNOWLEDGED_SAVE_CONTRACT,
+               "content_evidence": {"kind": "smb_acknowledged", "bytes": 3, "sha256": "a" * 64}}
+        self.assertTrue(confirmed_content(ack, payload, save_contract=ACKNOWLEDGED_SAVE_CONTRACT))
+        self.assertFalse(confirmed_content(ack, payload))
+        self.assertFalse(confirmed_content(ack, payload, save_contract=ACKNOWLEDGED_SAVE_CONTRACT, reconcile=True))
+        recovery = copy.deepcopy(ack); recovery["content_evidence"]["kind"] = "remote_sha256"
+        self.assertTrue(confirmed_content(recovery, payload, save_contract=ACKNOWLEDGED_SAVE_CONTRACT, reconcile=True))
+        for field, value in (("bytes", True), ("bytes", 3.0), ("bytes", -1), ("sha256", "BAD"),
+                             ("sha256", "b" * 64), ("kind", "unknown"), ("trusted", True)):
+            changed = copy.deepcopy(ack); changed["content_evidence"][field] = value
+            with self.subTest(field=field, value=value):
+                self.assertFalse(confirmed_content(changed, payload, save_contract=ACKNOWLEDGED_SAVE_CONTRACT))
 
 
 if __name__ == "__main__":

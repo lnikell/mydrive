@@ -131,6 +131,60 @@ private final class ByteSamples: @unchecked Sendable {
         print("PASS observed-list actual subprocess start ordering, same-identity terminal, empty/page bounds and cancellation")
     }
 
+    private static func acknowledgedWire(_ root: URL, settings: ConnectionSettings) async throws {
+        let helper = root.appendingPathComponent("ack-wire-probe.py")
+        let script = #"""
+#!/usr/bin/python3
+import json,sys
+wire=json.load(sys.stdin);op=wire['operation'];r=op['request'];p=r['payload'];mode=r['path'].rsplit('/',1)[-1]
+a=r['receipt']['staged']['entry'];e=dict(a);e.update(name=mode,bytes=p['bytes'])
+proof={'kind':'remote_sha256' if op['type']=='reconcile' else 'smb_acknowledged','bytes':p['bytes'],'sha256':p['sha256']}
+v={'operation_id':r['operation_id'],'outcome':'committed','code':'committed','entry':e,'cleanup_pending':False,'save_contract':r['save_contract'],'content_evidence':proof}
+if mode=='wrong-role':proof['kind']='smb_acknowledged' if op['type']=='reconcile' else 'remote_sha256'
+if mode=='wrong-bytes':proof['bytes']+=1
+if mode=='wrong-hash':proof['sha256']='b'*64
+if mode=='missing-echo':del v['save_contract']
+if mode=='missing-evidence':del v['content_evidence']
+if mode=='legacy-sha':v['sha256']=p['sha256']
+if mode=='unknown-kind':proof['kind']='trusted'
+if mode=='extra-evidence':proof['trusted']=True
+if mode=='wrong-identity':e['index_number']=99
+if mode=='terminal-stage':v['staged']=r['receipt']['staged']
+print(json.dumps({'type':'connected'}),flush=True)
+print(json.dumps({'type':'complete','result':v}),flush=True)
+"""#
+        try Data(script.utf8).write(to: helper)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: helper.path)
+        let client = SMBClient(settings: settings, developmentPassword: "local-wire-only", helperURL: helper)
+        let key = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+        let digest = String(repeating: "a", count: 64)
+        func request(_ mode: String) -> SMBMutationRequest {
+            let name = ".mydrive-" + key.uuidString.lowercased() + ".stage"
+            let creator = SMBEntry(name: name, bytes: 0, directory: false, index_number: 42,
+                created_filetime: 7, modified_filetime: 9, changed_filetime: 10, attributes: 32)
+            return .init(operationID: key, kind: .createFile, path: "fixture/" + mode,
+                parent: .init(.init(indexNumber: 1, createdFiletime: 1)),
+                payload: .init(source: "/synthetic/owned", bytes: 3, sha256: digest),
+                receipt: .init(staged: .init(path: "fixture/" + name, entry: creator, cleanup_safe: true,
+                    phase: .allocated, security_sha256: digest, saveContract: .acknowledgedSMBV2)), saveContract: .acknowledgedSMBV2)
+        }
+        let ack = try await client.mutate(request("valid"))
+        let read = try await client.mutate(request("valid"), reconcile: true)
+        try check(ack.sha256 == nil && ack.content_evidence?.kind == .smbAcknowledged &&
+                  read.sha256 == nil && read.content_evidence?.kind == .remoteSHA256,
+                  "Actual subprocess confused input acknowledgement and remote SHA evidence")
+        for mode in ["wrong-role", "wrong-bytes", "wrong-hash", "missing-echo", "missing-evidence", "legacy-sha",
+                     "unknown-kind", "extra-evidence", "wrong-identity", "terminal-stage"] {
+            for reconcile in [false, true] {
+                do {
+                    _ = try await client.mutate(request(mode), reconcile: reconcile)
+                    throw CocoaError(.fileReadCorruptFile)
+                } catch SMBClientError.invalidResponse { }
+            }
+        }
+        print("PASS real subprocess ACK/reconcile contract echo and typed proof reject legacy SHA, malformed roles and creator rebinding")
+    }
+
     static func main() async throws {
         guard CommandLine.arguments.count == 2 else { throw SMBClientError.invalidResponse }
         let helper = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -207,6 +261,7 @@ private final class ByteSamples: @unchecked Sendable {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mydrive-transport-request-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        try await acknowledgedWire(root, settings: settings)
         for (index, path) in [composed, decomposed, "--looks-like-an-option"].enumerated() {
             let destination = root.appendingPathComponent("\(index)-r\u{e9}sultat.txt")
             let observation = try await client.download(path: path, to: destination) { _ in }

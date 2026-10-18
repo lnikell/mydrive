@@ -87,6 +87,7 @@ impl PreparedStage {
             && self.artifact.phase == staged.phase
             && self.artifact.cleanup_safe == staged.cleanup_safe
             && self.artifact.security_sha256 == staged.security_sha256
+            && self.artifact.save_contract == staged.save_contract
     }
     async fn recheck(&self) -> Result<Entry> {
         let observed = self.handle.observe(&self.artifact.path).await?;

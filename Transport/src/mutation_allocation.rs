@@ -94,6 +94,7 @@ impl MutationIO {
                 self.verify_allocated(path, &entry, &fingerprint, None)
                     .await
                     .map(|entry| Artifact {
+                        save_contract: request.save_contract,
                         path: path.to_owned(),
                         entry,
                         cleanup_safe: true,

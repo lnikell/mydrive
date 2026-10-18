@@ -140,6 +140,7 @@ public struct JournalIntent: Codable, Equatable, Sendable {
     public let baseEntry: RemoteEntry?
     public let deletionContextID: String?
     public let tree: StagedTreeReference?
+    public let saveContract: MutationSaveContract?
 
     public init(
         idempotencyKey: UUID = UUID(), itemID: String,
@@ -147,7 +148,7 @@ public struct JournalIntent: Codable, Equatable, Sendable {
         expectedMetadataVersion: String? = nil, payload: StagedPayload? = nil,
         createTemplateID: String? = nil, sourcePath: String? = nil,
         destinationPath: String? = nil, baseEntry: RemoteEntry? = nil, deletionContextID: String? = nil,
-        tree: StagedTreeReference? = nil
+        tree: StagedTreeReference? = nil, saveContract: MutationSaveContract? = nil
     ) {
         self.idempotencyKey = idempotencyKey
         self.itemID = itemID
@@ -161,6 +162,7 @@ public struct JournalIntent: Codable, Equatable, Sendable {
         self.baseEntry = baseEntry
         self.deletionContextID = deletionContextID
         self.tree = tree
+        self.saveContract = saveContract
     }
 }
 

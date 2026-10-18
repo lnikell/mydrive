@@ -42,10 +42,7 @@ struct MutationStaging: Sendable {
                 guard destinationFD >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
                 let destination = FileHandle(fileDescriptor: destinationFD, closeOnDealloc: true)
                 defer { try? destination.close() }
-                while let bytes = try original.read(upToCount: 1_048_576), !bytes.isEmpty {
-                    try Task.checkCancellation()
-                    try destination.write(contentsOf: bytes)
-                }
+                _ = try Self.readChunks(original) { try destination.write(contentsOf: $0) }
                 try destination.synchronize()
             }
             let stagedFD = open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
@@ -54,13 +51,7 @@ struct MutationStaging: Sendable {
             defer { try? file.close() }
             try rejectResourceFork(stagedFD)
             var digest = SHA256()
-            var count: Int64 = 0
-            while let bytes = try file.read(upToCount: 1_048_576), !bytes.isEmpty {
-                try Task.checkCancellation()
-                let (next, overflow) = count.addingReportingOverflow(Int64(bytes.count))
-                guard !overflow else { throw CocoaError(.fileReadTooLarge) }
-                count = next; digest.update(data: bytes)
-            }
+            let count = try Self.readChunks(file) { digest.update(data: $0) }
             let writer = try FileHandle(forWritingTo: url)
             try writer.synchronize(); try writer.close()
             try synchronizeDirectory()
@@ -70,6 +61,24 @@ struct MutationStaging: Sendable {
             try? FileManager.default.removeItem(at: url)
             throw error
         }
+    }
+
+    /// Read and consume inside the same pool: Foundation's temporary backing
+    /// objects must drain before the next chunk. These consumers never retain
+    /// data or suspend; FileHandle ownership and durability stay with stage.
+    static func readChunks(_ file: FileHandle, consume: (Data) throws -> Void) throws -> Int64 {
+        var count: Int64 = 0
+        while try autoreleasepool(invoking: {
+            try Task.checkCancellation()
+            guard let bytes = try file.read(upToCount: 1_048_576), !bytes.isEmpty else { return false }
+            try Task.checkCancellation()
+            let (next, overflow) = count.addingReportingOverflow(Int64(bytes.count))
+            guard !overflow else { throw CocoaError(.fileReadTooLarge) }
+            try consume(bytes)
+            count = next
+            return true
+        }) { }
+        return count
     }
 
     func discard(_ payload: StagedPayload?) {
@@ -195,13 +204,17 @@ extension MutationPlan {
 struct TreeImportLocalState: Codable, Sendable {
     let tree: StagedTreeReference
     let layoutVersion: Int
+    let saveContract: MutationSaveContract?
     var localRetirementStarted = false
-    init(tree: StagedTreeReference) { self.tree = tree; layoutVersion = 2 }
-    private enum CodingKeys: String, CodingKey { case tree, layoutVersion, localRetirementStarted }
+    init(tree: StagedTreeReference, saveContract: MutationSaveContract? = nil) {
+        self.tree = tree; layoutVersion = 2; self.saveContract = saveContract
+    }
+    private enum CodingKeys: String, CodingKey { case tree, layoutVersion, localRetirementStarted, saveContract }
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         tree = try values.decode(StagedTreeReference.self, forKey: .tree)
         layoutVersion = try values.decode(Int.self, forKey: .layoutVersion)
+        saveContract = try values.decodeIfPresent(MutationSaveContract.self, forKey: .saveContract)
         localRetirementStarted = try values.decodeIfPresent(Bool.self, forKey: .localRetirementStarted) ?? false
         guard layoutVersion == 2 else { throw DecodingError.dataCorruptedError(forKey: .layoutVersion, in: values,
             debugDescription: "Unsupported private tree input layout") }
@@ -219,9 +232,11 @@ struct MutationLocalRecovery: Codable, Sendable {
     let fields: UInt64
     let baseContent: Data?
     let baseMetadata: Data?
+    let saveContract: MutationSaveContract?
 
-    init(input: MutationInput, payload: StagedPayload) {
+    init(input: MutationInput, payload: StagedPayload, saveContract: MutationSaveContract? = nil) {
         self.payload = payload
+        self.saveContract = saveContract
         requestedParentID = input.parentID; requestedName = input.filename
         requestedKind = input.kind; fields = UInt64(input.fields.rawValue)
         baseContent = input.baseContent; baseMetadata = input.baseMetadata

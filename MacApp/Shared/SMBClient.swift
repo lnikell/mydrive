@@ -68,9 +68,11 @@ private struct TransportEvent: Decodable {
         let cleanup_pending: Bool?
         let staged: SMBMutationRequest.Artifact?
         let archived: SMBMutationRequest.Artifact?
+        let save_contract: MutationSaveContract?
+        let content_evidence: MutationContentEvidence?
 
         private enum CodingKeys: String, CodingKey {
-            case complete, bytes, entry, operation_id, outcome, code, sha256, cleanup_pending, staged, archived
+            case complete, bytes, entry, operation_id, outcome, code, sha256, cleanup_pending, staged, archived, save_contract, content_evidence
         }
         init(from decoder: any Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -85,6 +87,8 @@ private struct TransportEvent: Decodable {
             cleanup_pending = try values.decodeIfPresent(Bool.self, forKey: .cleanup_pending)
             staged = try values.decodeIfPresent(SMBMutationRequest.Artifact.self, forKey: .staged)
             archived = try values.decodeIfPresent(SMBMutationRequest.Artifact.self, forKey: .archived)
+            save_contract = try values.decodeIfPresent(MutationSaveContract.self, forKey: .save_contract)
+            content_evidence = try values.decodeIfPresent(MutationContentEvidence.self, forKey: .content_evidence)
         }
     }
 
@@ -289,46 +293,17 @@ struct SMBClient: Sendable {
         }
         guard request.delete_scope == nil || request.tree_scope == nil else { throw SMBClientError.invalidResponse }
         if let scope = request.tree_scope, !scope.isValid || !scope.contains(request.path) { throw SMBClientError.invalidResponse }
+        try request.validate(receipt: request.receipt)
         let result = try await run(reconcile ? .reconcile(request) : .mutate(request), progress: progress)
         guard let result, result.operation_id == request.operation_id,
               let outcome = result.outcome, let code = result.code,
               let cleanup = result.cleanup_pending else { throw SMBClientError.invalidResponse }
-        if let entry = result.entry, entry.bytes < 0 { throw SMBClientError.invalidResponse }
-        if outcome == .committed {
-            if [.createFile, .createDirectory, .replaceFile, .move].contains(request.kind) {
-                let path = request.destination ?? request.path
-                guard let entry = result.entry,
-                      entry.name.utf8.elementsEqual(path.split(separator: "/").last!.utf8),
-                      entry.directory == (request.kind == .createDirectory || request.expected?.directory == true) else {
-                    throw SMBClientError.invalidResponse
-                }
-            }
-            if let payload = request.payload {
-                guard result.entry?.bytes == payload.bytes, result.sha256 == payload.sha256 else {
-                    throw SMBClientError.invalidResponse
-                }
-            }
-        }
-        if let hash = result.sha256, !SMBMutationRequest.validHash(hash) { throw SMBClientError.invalidResponse }
-        let receipt = SMBMutationRequest.Receipt(staged: result.staged, archived: result.archived)
-        try request.validate(receipt: receipt)
-        if code == "allocation_unknown" {
-            guard outcome == .uncertain, request.receipt.staged == nil,
-                  receipt.staged == nil else { throw SMBClientError.invalidResponse }
-            if let archived = request.receipt.archived, receipt.archived != archived { throw SMBClientError.invalidResponse }
-        }
-        if outcome == .notApplied && code == "allocated" {
-            guard receipt.staged?.phase == .allocated, receipt.archived == nil else { throw SMBClientError.invalidResponse }
-        }
-        if outcome == .notApplied && code == "prepared" {
-            guard let staged = receipt.staged, staged.phase == .prepared,
-                  request.payload.map({ staged.entry.bytes == $0.bytes }) ?? staged.entry.directory else {
-                throw SMBClientError.invalidResponse
-            }
-        }
-        return SMBMutationResult(operation_id: request.operation_id, outcome: outcome, code: code,
-                                 entry: result.entry, sha256: result.sha256,
-                                 cleanup_pending: cleanup, receipt: receipt)
+        let value = SMBMutationResult(operation_id: request.operation_id, outcome: outcome, code: code,
+            entry: result.entry, sha256: result.sha256, cleanup_pending: cleanup,
+            receipt: .init(staged: result.staged, archived: result.archived),
+            saveContract: result.save_contract, contentEvidence: result.content_evidence)
+        try value.validate(for: request, reconcile: reconcile)
+        return value
     }
 
     @discardableResult private func run(_ operation: TransportOperation,

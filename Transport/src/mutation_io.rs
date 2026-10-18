@@ -45,6 +45,9 @@ use handle::{Handle, Open};
 #[path = "mutation_prepared.rs"]
 mod prepared;
 
+#[path = "mutation_acknowledged_io.rs"]
+mod acknowledged;
+
 #[path = "directory_listing.rs"]
 pub(crate) mod listing;
 
@@ -321,6 +324,25 @@ mod tree_scope_tests;
 mod prepared_tests;
 
 impl Remote for MutationIO {
+    async fn hash_origin(
+        &mut self,
+        path: &str,
+        expected: &Entry,
+        origin: &mutation::Artifact,
+    ) -> Result<String> {
+        self.hash_creator_content(path, expected, origin).await
+    }
+    async fn acknowledged_commit(
+        &mut self,
+        request: &MutationRequest,
+        origin: &mutation::Artifact,
+        payload: &mut VerifiedPayload,
+        archived: &mut Option<mutation::Artifact>,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<Entry> {
+        self.commit_acknowledged_writer(request, origin, payload, archived, progress)
+            .await
+    }
     async fn prepare_publication(
         &mut self,
         request: &MutationRequest,

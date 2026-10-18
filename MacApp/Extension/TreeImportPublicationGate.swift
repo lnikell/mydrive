@@ -7,7 +7,7 @@ extension ProviderTreeImport {
     func settleChildren(_ status: TreeImportStatus, publishing: UUID? = nil) async throws {
         guard status.layoutVersion == 2, let root = try mutations.staging.load(status.key),
               let retained = root.treeImport, retained.layoutVersion == 2,
-              retained.tree == status.tree else { throw unfinishedTree() }
+              retained.tree == status.tree, retained.saveContract == status.saveContract else { throw unfinishedTree() }
         let snapshot = try LocalTreeSnapshot.load(retained.tree, in: mutations.staging)
         var cursor: Int64?
         while true {
@@ -29,7 +29,8 @@ extension ProviderTreeImport {
                 }
                 guard bound.operation.state == .completed,
                       let result = plan.steps[0].result, result.outcome == .committed,
-                      let receipt = try await mutations.catalog.mutationResult(key: key)?.items.first,
+                      let completed = try await mutations.catalog.mutationResult(key: key), let receipt = completed.items.first,
+                      result.content_evidence == completed.contentEvidence,
                       Self.matches(result.entry, base: receipt.entry) else { throw unfinishedTree() }
                 await mutations.cleanup(plan: &plan, retirePlan: false)
                 guard noUncertainArtifacts(plan), artifactsClean(plan) else { throw unfinishedTree() }
@@ -79,10 +80,7 @@ extension ProviderTreeImport {
     }
 
     private func artifactsClean(_ plan: MutationPlan) -> Bool {
-        plan.steps.allSatisfy { step in
-            [step.request.receipt.staged, step.request.receipt.archived].compactMap { $0 }
-                .allSatisfy { $0.cleanup_safe && plan.cleanedArtifacts.contains($0.path) }
-        }
+        plan.cleanupCandidates.allSatisfy { $0.artifact.cleanup_safe && plan.cleanedArtifacts.contains($0.artifact.path) }
     }
 
     private func unfinishedTree() -> NSError {

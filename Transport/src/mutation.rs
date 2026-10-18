@@ -6,8 +6,8 @@ use crate::{Entry, Error, Result};
 #[path = "mutation_request.rs"]
 mod request;
 pub use request::{
-    Artifact, DirectoryIdentity, MutationKind, MutationRequest, MutationResult, Outcome, Payload,
-    Receipt, StagePhase,
+    Artifact, ContentEvidence, ContentEvidenceKind, DirectoryIdentity, MutationKind,
+    MutationRequest, MutationResult, Outcome, Payload, Receipt, SaveContract, StagePhase,
 };
 
 #[path = "mutation_scope.rs"]
@@ -34,15 +34,50 @@ pub(crate) fn scope_changed(request: &MutationRequest) -> MutationResult {
     )
 }
 
+pub(crate) fn finish_acknowledged(
+    request: &MutationRequest,
+    result: &mut MutationResult,
+    closed: Result<()>,
+    cancel: &crate::CancellationToken,
+) {
+    let failure = if cancel.is_cancelled() {
+        Some(Error::Cancelled)
+    } else {
+        closed.err()
+    };
+    if let Some(error) = failure {
+        result.outcome = Outcome::Uncertain;
+        result.code = error.code();
+        result.entry = None;
+        result.sha256 = None;
+        result.content_evidence = None;
+        if result.receipt.staged.is_none() {
+            result.receipt.staged = request.receipt.staged.clone();
+        }
+        result.cleanup_pending =
+            result.receipt.staged.is_some() || result.receipt.archived.is_some();
+    }
+}
+
 fn fence_changed(request: &MutationRequest, code: &'static str) -> MutationResult {
     MutationResult {
+        save_contract: request.save_contract,
+        content_evidence: None,
         operation_id: request.operation_id.clone(),
-        outcome: Outcome::Conflict,
+        outcome: conflict_outcome(request, &request.receipt),
         code,
         entry: None,
         sha256: None,
         cleanup_pending: request.receipt.staged.is_some() || request.receipt.archived.is_some(),
         receipt: request.receipt.clone(),
+    }
+}
+
+fn conflict_outcome(request: &MutationRequest, receipt: &Receipt) -> Outcome {
+    if request.save_contract.is_some() && receipt.archived.is_some() {
+        Outcome::Uncertain
+    } else {
+        Outcome::Conflict
     }
 }
 
@@ -136,6 +171,20 @@ pub(crate) trait Remote {
     ) -> Result<Entry>;
     async fn remove(&mut self, path: &str, expected: &Entry) -> Result<()>;
     async fn canonical_name(&mut self, path: &str, expected: &Entry) -> Result<String>;
+    async fn hash_origin(
+        &mut self,
+        path: &str,
+        expected: &Entry,
+        origin: &Artifact,
+    ) -> Result<String>;
+    async fn acknowledged_commit(
+        &mut self,
+        request: &MutationRequest,
+        origin: &Artifact,
+        payload: &mut VerifiedPayload,
+        archived: &mut Option<Artifact>,
+        progress: &mut dyn FnMut(u64),
+    ) -> Result<Entry>;
     async fn prepare_publication(
         &mut self,
         request: &MutationRequest,
@@ -187,6 +236,8 @@ pub(crate) async fn run(
     progress: &mut dyn FnMut(u64),
 ) -> MutationResult {
     let mut result = MutationResult {
+        save_contract: request.save_contract,
+        content_evidence: None,
         operation_id: request.operation_id.clone(),
         outcome: Outcome::NotApplied,
         code: "not_applied",
@@ -210,13 +261,19 @@ pub(crate) async fn run(
             error,
             Error::Changed | Error::ScopeChanged | Error::Smb(smb2::ErrorKind::AlreadyExists)
         ) {
-            result.outcome = Outcome::Conflict;
+            result.outcome = conflict_outcome(request, &result.receipt);
         } else if matches!(error, Error::DirectoryNotEmpty) || result.outcome != Outcome::Uncertain
         {
             result.outcome = Outcome::NotApplied;
         }
     }
     result.cleanup_pending = result.receipt.staged.is_some() || result.receipt.archived.is_some();
+    if request.save_contract.is_some() {
+        result.sha256 = None;
+        if result.outcome != Outcome::Committed {
+            result.content_evidence = None;
+        }
+    }
     result
 }
 
@@ -229,6 +286,12 @@ async fn execute(
     progress: &mut dyn FnMut(u64),
 ) -> Result<()> {
     let current = remote.stat(&request.path).await?;
+    if request.save_contract.is_some() {
+        return acknowledged::execute(
+            remote, request, result, current, payload, reconcile, progress,
+        )
+        .await;
+    }
     match request.kind {
         MutationKind::CreateFile | MutationKind::CreateDirectory | MutationKind::ReplaceFile => {
             publish(
@@ -330,6 +393,7 @@ async fn execute(
                     .is_some_and(|entry| same_renamed_version(expected, entry))
             {
                 result.receipt.archived = archived.map(|entry| Artifact {
+                    save_contract: None,
                     cleanup_safe: durable_artifact_matches(&request.receipt.archived, &entry),
                     path: archived_path,
                     entry,
@@ -358,6 +422,7 @@ async fn execute(
                 )
                 .await?;
             result.receipt.archived = Some(Artifact {
+                save_contract: None,
                 path: archived_path,
                 entry,
                 cleanup_safe: true,
@@ -391,6 +456,7 @@ async fn publish(
             return Err(Error::Changed);
         }
         result.receipt.archived = Some(Artifact {
+            save_contract: None,
             path: backup_path.clone(),
             entry: backup.clone(),
             cleanup_safe: durable_artifact_matches(&request.receipt.archived, backup),
@@ -465,6 +531,7 @@ async fn publish(
                 .stage(request, &stage_path, payload.as_deref_mut(), progress)
                 .await?;
             result.receipt.staged = Some(Artifact {
+                save_contract: None,
                 path: stage_path,
                 entry: prepared,
                 cleanup_safe: true,
@@ -481,6 +548,7 @@ async fn publish(
             .as_ref()
             .is_some_and(|artifact| same_version(&artifact.entry, entry));
         let artifact = Artifact {
+            save_contract: None,
             path: stage_path.clone(),
             entry: entry.clone(),
             cleanup_safe: durable_artifact_matches(&request.receipt.staged, entry),
@@ -553,6 +621,7 @@ async fn publish(
             )
             .await?;
         result.receipt.archived = Some(Artifact {
+            save_contract: None,
             path: backup_path,
             entry: original,
             cleanup_safe: true,
@@ -594,3 +663,6 @@ fn durable_artifact_matches(receipt: &Option<Artifact>, observed: &Entry) -> boo
 #[cfg(test)]
 #[path = "mutation_tests.rs"]
 mod tests;
+
+#[path = "mutation_acknowledged.rs"]
+mod acknowledged;

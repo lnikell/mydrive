@@ -148,8 +148,12 @@ class Helper:
             if set(operation) != {"type", "request"} or not isinstance(operation["request"], dict):
                 raise BenchmarkError("malformed native mutation request")
             mutation = operation["request"]
-            if set(mutation) - {"operation_id", "kind", "path", "destination", "expected", "payload", "receipt", "parent", "destination_parent", "delete_scope"}:
+            if set(mutation) - {"operation_id", "kind", "path", "destination", "expected", "payload", "receipt", "parent", "destination_parent", "delete_scope", "save_contract"}:
                 raise BenchmarkError("unexpected native mutation fields")
+            if "save_contract" in mutation and (mutation["save_contract"] != "acknowledged_smb_v2"
+                    or mutation.get("kind") not in ("create_file", "replace_file")
+                    or not isinstance(mutation.get("payload"), dict)):
+                raise BenchmarkError("unsupported native save contract")
             for field in ("parent", "destination_parent"):
                 identity = mutation.get(field)
                 required = field == "parent" or mutation.get("kind") == "move"

@@ -18,11 +18,12 @@ struct MutationPreparation: Sendable {
     let remote: MutationRemote
 
     func prepare(_ input: MutationInput, create: Bool, key: UUID,
-                         payload: StagedPayload?) async throws -> (intent: JournalIntent, plan: MutationPlan) {
+                         payload: StagedPayload?, saveContract: MutationSaveContract? = nil) async throws -> (intent: JournalIntent, plan: MutationPlan) {
         guard let parent = try await catalog.item(id: input.parentID), !parent.isDeleted,
               parent.entry.kind == .directory, let parentPath = try await catalog.relativePath(id: input.parentID) else {
             throw NSError.fileProviderErrorForNonExistentItem(withIdentifier: ProviderItem.identifier(input.parentID))
         }
+        let contract = payload == nil ? nil : saveContract
         let target = ProviderMutations.join(parentPath, input.filename)
         let targetParent = try await verifiedParent(input.parentID)
         let wirePayload = payload.map { SMBMutationRequest.Payload(source: staging.payloadURL($0.id).path,
@@ -39,13 +40,13 @@ struct MutationPreparation: Sendable {
                 _ = try await verifiedParent(oldParent)
                 let name = ProviderMutations.conflictName(input.filename, key: key)
                 let request = SMBMutationRequest(operationID: key, kind: .createFile,
-                    path: ProviderMutations.join(parentPath, name), parent: targetParent, payload: wirePayload)
+                    path: ProviderMutations.join(parentPath, name), parent: targetParent, payload: wirePayload, saveContract: contract)
                 let intent = JournalIntent(idempotencyKey: key, itemID: id,
                     expectedVersion: existing.entry.contentVersion,
                     action: .update(parentID: input.parentID, name: name),
                     expectedMetadataVersion: existing.entry.metadataVersion, payload: payload,
                     createTemplateID: nil, sourcePath: source, destinationPath: request.path,
-                    baseEntry: existing.entry)
+                    baseEntry: existing.entry, saveContract: contract)
                 let originalID = try await catalog.providerID(forCreateTemplate: "conflict-original:\(key.uuidString.lowercased())")
                 var plan = MutationPlan(key: key, itemID: id, parentID: input.parentID, filename: name,
                     steps: [.init(request: request)], preservedOriginal: CatalogMutationItem(
@@ -55,10 +56,10 @@ struct MutationPreparation: Sendable {
             }
             if try await remote.stat(target) != nil { throw try await collision(parentID: input.parentID, name: input.filename) }
             let request = SMBMutationRequest(operationID: key,
-                kind: input.kind == .directory ? .createDirectory : .createFile, path: target, parent: targetParent, payload: wirePayload)
+                kind: input.kind == .directory ? .createDirectory : .createFile, path: target, parent: targetParent, payload: wirePayload, saveContract: contract)
             let intent = JournalIntent(idempotencyKey: key, itemID: id, expectedVersion: nil,
                 action: .create(parentID: input.parentID, name: input.filename, kind: input.kind),
-                payload: payload, createTemplateID: input.id, destinationPath: target)
+                payload: payload, createTemplateID: input.id, destinationPath: target, saveContract: contract)
             return (intent, MutationPlan(key: key, itemID: id, parentID: input.parentID,
                 filename: input.filename, steps: [.init(request: request)], preservedOriginal: nil))
         }
@@ -74,11 +75,11 @@ struct MutationPreparation: Sendable {
             let name = ProviderMutations.conflictName(input.filename, key: key)
             let destination = ProviderMutations.join(parentPath, name)
             let request = SMBMutationRequest(operationID: key, kind: .createFile,
-                path: destination, parent: targetParent, payload: wirePayload)
+                path: destination, parent: targetParent, payload: wirePayload, saveContract: contract)
             let intent = JournalIntent(idempotencyKey: key, itemID: item.id,
                 expectedVersion: item.entry.contentVersion, action: .update(parentID: input.parentID, name: name),
                 expectedMetadataVersion: item.entry.metadataVersion, payload: payload,
-                sourcePath: source, destinationPath: destination, baseEntry: item.entry)
+                sourcePath: source, destinationPath: destination, baseEntry: item.entry, saveContract: contract)
             var plan = MutationPlan(key: key, itemID: item.id, parentID: input.parentID,
                 filename: name, steps: [.init(request: request)], preservedOriginal: nil)
             plan.sourceParentID = oldParent
@@ -93,7 +94,7 @@ struct MutationPreparation: Sendable {
             expectedVersion: input.baseContent.flatMap { String(data: $0, encoding: .utf8) }, action: action,
             expectedMetadataVersion: input.baseMetadata.flatMap { String(data: $0, encoding: .utf8) }, payload: payload,
             sourcePath: source, destinationPath: target,
-            baseEntry: input.baseContent == Data(item.entry.contentVersion.utf8) && input.baseMetadata == Data(item.entry.metadataVersion.utf8) ? item.entry : nil)
+            baseEntry: input.baseContent == Data(item.entry.contentVersion.utf8) && input.baseMetadata == Data(item.entry.metadataVersion.utf8) ? item.entry : nil, saveContract: contract)
         var plan = MutationPlan(key: key, itemID: item.id, parentID: input.parentID,
                                 filename: input.filename, steps: [], preservedOriginal: nil)
         plan.sourceParentID = oldParent
@@ -102,17 +103,17 @@ struct MutationPreparation: Sendable {
                 plan.filename = ProviderMutations.conflictName(input.filename, key: key)
                 let conflictPath = ProviderMutations.join(parentPath, plan.filename)
                 plan.steps = [.init(request: SMBMutationRequest(operationID: key, kind: .createFile,
-                                                                path: conflictPath, parent: targetParent, payload: wirePayload))]
+                                                                path: conflictPath, parent: targetParent, payload: wirePayload, saveContract: contract))]
                 plan.preservedOriginal = CatalogMutationItem(
                     id: try await catalog.providerID(forCreateTemplate: "conflict-original:\(key.uuidString.lowercased())"),
                     parentID: oldParent, entry: observed.observation)
             } else if source.utf8.elementsEqual(target.utf8) {
                 plan.steps = [.init(request: SMBMutationRequest(operationID: key, kind: .replaceFile,
-                    path: source, parent: sourceParent, expected: observed, payload: wirePayload))]
+                    path: source, parent: sourceParent, expected: observed, payload: wirePayload, saveContract: contract))]
             } else {
                 if try await remote.stat(target) != nil { throw try await collision(parentID: input.parentID, name: input.filename) }
                 plan.steps = [
-                    .init(request: SMBMutationRequest(operationID: key, kind: .createFile, path: target, parent: targetParent, payload: wirePayload)),
+                    .init(request: SMBMutationRequest(operationID: key, kind: .createFile, path: target, parent: targetParent, payload: wirePayload, saveContract: contract)),
                     .init(request: SMBMutationRequest(operationID: MutationInput.derivedID(key, "retire-original"),
                                                       kind: .delete, path: source, parent: sourceParent, expected: observed))]
             }

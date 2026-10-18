@@ -15,7 +15,7 @@ public struct StagedPayload: Codable, Equatable, Sendable {
     }
 }
 
-/// An independently verified remote result, published under the exact Finder ID.
+/// A qualified remote observation, published under the exact Finder ID.
 public struct CatalogMutationItem: Codable, Equatable, Sendable {
     public let id: String
     public let parentID: String
@@ -34,6 +34,13 @@ public struct MutationCommitResult: Codable, Equatable, Sendable {
     public let items: [CatalogItem]
     public let tombstones: [String]
     public let generation: Int64
+    public let contentEvidence: MutationContentEvidence?
+
+    init(items: [CatalogItem], tombstones: [String], generation: Int64,
+         contentEvidence: MutationContentEvidence? = nil) {
+        self.items = items; self.tombstones = tombstones; self.generation = generation
+        self.contentEvidence = contentEvidence
+    }
 }
 
 extension JournalIntent {
@@ -67,6 +74,7 @@ extension JournalIntent {
             fields.add("tree-v1"); fields.add(String(tree.nodeCount))
             fields.add(String(tree.totalBytes)); fields.add(tree.sha256)
         }
+        if let saveContract { fields.add("saveContract"); fields.add(saveContract.rawValue) }
         return fields.digest
     }
 }

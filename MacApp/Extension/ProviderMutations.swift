@@ -52,6 +52,7 @@ struct ProviderMutations: Sendable {
             throw MutationInput.unsupported("This file has no contents available to upload.")
         }
         var candidate = hasContent ? try await staging.stage(input.contents!) : nil
+        var saveContract: MutationSaveContract? = hasContent ? .acknowledgedSMBV2 : nil
         let requestedKey = input.operationID(create: create, payload: candidate)
         // Repeated preflight failures for the same edit reuse its retained
         // bytes, instead of creating another unreferenced staged payload.
@@ -63,6 +64,7 @@ struct ProviderMutations: Sendable {
             }
             staging.discard(fresh)
             candidate = recovery.payload
+            saveContract = recovery.saveContract
         }
         var operation: JournalOperation
         do {
@@ -82,7 +84,7 @@ struct ProviderMutations: Sendable {
                         return current
                     }
                 }
-                let prepared = try await preparation.prepare(effective, create: create, key: requestedKey, payload: candidate)
+                let prepared = try await preparation.prepare(effective, create: create, key: requestedKey, payload: candidate, saveContract: saveContract)
                 try staging.save(prepared.plan)
                 operation = try await catalog.enqueue(prepared.intent)
                 if operation.intent.idempotencyKey != requestedKey {
@@ -99,7 +101,7 @@ struct ProviderMutations: Sendable {
                     var plan = try staging.load(requestedKey) ?? MutationPlan(key: requestedKey,
                         itemID: input.id, parentID: input.parentID, filename: input.filename,
                         steps: [], preservedOriginal: nil)
-                    plan.localRecovery = MutationLocalRecovery(input: input, payload: candidate)
+                    plan.localRecovery = MutationLocalRecovery(input: input, payload: candidate, saveContract: saveContract)
                     try staging.save(plan)
                     let translated = ProviderErrors.translate(error) as NSError
                     if translated.domain == NSFileProviderErrorDomain,
@@ -124,6 +126,7 @@ struct ProviderMutations: Sendable {
         guard var plan = try staging.load(key) else {
             throw MutationInput.unsupported("An interrupted upload is missing its recovery record. Its local contents are preserved.")
         }
+        try plan.qualifySave(operation.intent, staging: staging)
         let recovering = operation.state != .queued
         if operation.state == .queued || operation.state == .failed {
             if operation.state == .failed {
@@ -139,6 +142,7 @@ struct ProviderMutations: Sendable {
             if plan.steps[0].result?.outcome == .conflict,
                operation.intent.payload != nil, !create {
                 try await preserveConflict(plan: &plan, intent: operation.intent)
+                try plan.qualifySave(operation.intent, staging: staging)
                 try await performStep(0, plan: &plan, recovering: false,
                                       progress: { transfer.received($0) })
             }
@@ -158,7 +162,8 @@ struct ProviderMutations: Sendable {
             try await checkActive()
             guard let entry = plan.steps[0].result?.entry else { throw SMBClientError.invalidResponse }
             if let payload = operation.intent.payload {
-                guard entry.bytes == payload.size, plan.steps[0].result?.sha256 == payload.sha256 else {
+                guard entry.bytes == payload.size,
+                      operation.intent.saveContract != nil || plan.steps[0].result?.sha256 == payload.sha256 else {
                     throw SMBClientError.invalidResponse
                 }
             }
@@ -166,7 +171,8 @@ struct ProviderMutations: Sendable {
                                                entry: entry.observation)]
             if let original = plan.preservedOriginal { upserts.append(original) }
             let aliases = try await duplicateObservationIDs(for: upserts)
-            let committed = try await catalog.commitMutation(key: key, upserts: upserts, tombstones: aliases)
+            let committed = try await catalog.commitMutation(key: key, upserts: upserts, tombstones: aliases,
+                contentEvidence: plan.steps[0].result?.content_evidence)
             // After remote+database commit, cancellation must not make the bytes
             // appear uncommitted. OS callback replay returns this durable receipt.
             staging.discard(operation.intent.payload)
@@ -230,13 +236,16 @@ struct ProviderMutations: Sendable {
     func performStep(_ index: Int, plan: inout MutationPlan, recovering: Bool,
                              progress: (@Sendable (Int64) -> Void)?) async throws {
         guard plan.steps.indices.contains(index) else { throw CocoaError(.fileReadCorruptFile) }
-        if plan.steps[index].result?.outcome == .committed { return }
-        var reconcile = recovering || plan.steps[index].result?.outcome == .uncertain
+        if let saved = plan.steps[index].result { try saved.validate(for: plan.steps[index].request) }
+        let savedV2Commit = plan.steps[index].request.save_contract != nil && plan.steps[index].result?.outcome == .committed
+        if plan.steps[index].result?.outcome == .committed && !savedV2Commit { return }
+        var reconcile = recovering || savedV2Commit || plan.steps[index].result?.outcome == .uncertain
         // At most: reconcile, two lost-allocation rotations, allocated/prepared
         // checkpoints, and publish. Retry scheduling remains with File Provider.
         for _ in 0..<8 {
             try await checkActive()
             let result = try await remote.mutate(plan.steps[index].request, reconcile, progress)
+            try result.validate(for: plan.steps[index].request, reconcile: reconcile)
             if result.code == "allocation_unknown" {
                 guard result.outcome == .uncertain,
                       plan.steps[index].request.receipt.staged == nil,
@@ -244,8 +253,7 @@ struct ProviderMutations: Sendable {
                 if let archived = plan.steps[index].request.receipt.archived,
                    result.receipt.archived != archived { throw SMBClientError.invalidResponse }
             }
-            plan.steps[index].result = result
-            plan.steps[index].request.receipt = result.receipt
+            plan.recordSaveResult(result, at: index)
             try staging.save(plan)
             if result.outcome == .uncertain, result.code == "allocation_unknown" {
                 let unknown = plan.steps[index].request.sidecar("stage")
@@ -287,7 +295,7 @@ struct ProviderMutations: Sendable {
             kind: previous.kind, path: previous.path, parent: previous.parent,
             destination: previous.destination, destinationParent: previous.destination_parent,
             expected: previous.expected, payload: previous.payload, deleteScope: previous.delete_scope,
-            treeScope: previous.tree_scope)
+            treeScope: previous.tree_scope, saveContract: previous.save_contract)
         plan.retainedRequests.append(previous)
         plan.steps[index] = .init(request: request)
         try staging.save(plan)
@@ -311,7 +319,7 @@ struct ProviderMutations: Sendable {
             .dropLast().joined(separator: "/")
         let request = SMBMutationRequest(operationID: MutationInput.derivedID(plan.key, "conflict"), kind: .createFile,
             path: Self.join(parentPath, plan.filename), parent: previous.request.parent, payload: .init(source: staging.payloadURL(payload.id).path,
-                                                                    bytes: payload.size, sha256: payload.sha256))
+                                                                    bytes: payload.size, sha256: payload.sha256), saveContract: intent.saveContract)
         plan.retainedRequests.append(previous.request)
         plan.steps = [.init(request: request)]
         try await preserveOriginal(plan: &plan, path: path, parentID: plan.sourceParentID ?? Catalog.rootID, observed: original)
@@ -402,28 +410,31 @@ struct ProviderMutations: Sendable {
                 // Keep wire receipts until the root has passed its complete
                 // publication gate. Missing files are not cleanup evidence.
                 mayRetirePlan = false
-            }
+            } else if let operation = try await catalog.operation(key: plan.key) {
+                try plan.qualifySave(operation.intent, staging: staging)
+                if operation.intent.saveContract != nil {
+                    guard operation.state == .completed,
+                          let completed = try await catalog.mutationResult(key: plan.key),
+                          plan.steps.first?.result?.content_evidence == completed.contentEvidence else { return }
+                }
+            } else if (plan.steps.map(\.request) + plan.retainedRequests).contains(where: { $0.save_contract != nil }) { return }
         } catch { return }
-        for originalRequest in plan.steps.map(\.request) + plan.retainedRequests {
-            for artifact in [originalRequest.receipt.staged, originalRequest.receipt.archived].compactMap({ $0 })
+        for (originalRequest, artifact) in plan.cleanupCandidates
                 where artifact.cleanup_safe && !plan.cleanedArtifacts.contains(artifact.path) {
-                do {
-                    try await checkActive()
-                    guard let operationID = UUID(uuidString: originalRequest.operation_id) else { continue }
-                    let request = SMBMutationRequest(operationID: operationID,
-                        kind: .cleanup, path: artifact.path, parent: originalRequest.parent, expected: artifact.entry,
-                        deleteScope: originalRequest.delete_scope, treeScope: originalRequest.tree_scope)
-                    let result = try await remote.mutate(request, false, nil)
-                    if result.outcome == .committed {
-                        plan.cleanedArtifacts.insert(artifact.path)
-                        try staging.save(plan)
-                    }
-                } catch { return /* A later refresh/replay resumes this exact candidate. */ }
-            }
+            do {
+                try await checkActive()
+                guard let operationID = UUID(uuidString: originalRequest.operation_id) else { continue }
+                let request = SMBMutationRequest(operationID: operationID,
+                    kind: .cleanup, path: artifact.path, parent: originalRequest.parent, expected: artifact.entry,
+                    deleteScope: originalRequest.delete_scope, treeScope: originalRequest.tree_scope)
+                let result = try await remote.mutate(request, false, nil)
+                if result.outcome == .committed {
+                    plan.cleanedArtifacts.insert(artifact.path)
+                    try staging.save(plan)
+                }
+            } catch { return /* A later refresh/replay resumes this exact candidate. */ }
         }
-        let artifacts = (plan.steps.map(\.request) + plan.retainedRequests).flatMap {
-            [$0.receipt.staged, $0.receipt.archived].compactMap { $0 }
-        }
+        let artifacts = plan.cleanupCandidates.map(\.artifact)
         if mayRetirePlan && plan.localRecovery == nil && plan.unresolvedAllocationPaths.isEmpty && artifacts.allSatisfy({ plan.cleanedArtifacts.contains($0.path) }) {
             try? staging.removePlan(plan.key)
         }
@@ -441,9 +452,7 @@ struct ProviderMutations: Sendable {
                 if try await catalog.mutationResult(key: key) != nil {
                     await cleanup(plan: &plan)
                     if plan.treeImport != nil, (try? staging.load(key)) != nil { report.cleanupPending += 1 }
-                    let artifacts = (plan.steps.map(\.request) + plan.retainedRequests).flatMap {
-                        [$0.receipt.staged, $0.receipt.archived].compactMap { $0 }
-                    }.filter { !plan.cleanedArtifacts.contains($0.path) }
+                    let artifacts = plan.cleanupCandidates.map(\.artifact).filter { !plan.cleanedArtifacts.contains($0.path) }
                     report.cleanupPending += artifacts.filter(\.cleanup_safe).count
                     report.retained += artifacts.filter { !$0.cleanup_safe }.count
                 } else { report.recoveryPending += 1 }

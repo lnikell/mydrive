@@ -216,6 +216,7 @@ fn parent_refusal_retains_existing_recovery_evidence() {
         attributes: 32,
     };
     let request = MutationRequest {
+        save_contract: None,
         operation_id: "11111111-2222-4333-8444-555555555555".into(),
         kind: MutationKind::ReplaceFile,
         path: "file".into(),
@@ -235,6 +236,7 @@ fn parent_refusal_retains_existing_recovery_evidence() {
         }),
         receipt: Receipt {
             staged: Some(mutation::Artifact {
+                save_contract: None,
                 path: ".mydrive-11111111-2222-4333-8444-555555555555.stage".into(),
                 entry,
                 cleanup_safe: false,

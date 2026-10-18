@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Opt-in signed write trials in a fresh target-bound disposable NAS root."""
+import argparse
 import copy
 import getpass
 import json
@@ -11,10 +12,39 @@ import uuid
 from nas_benchmark import BenchmarkError, Helper, PROJECT, file_hash
 from nas_test_config import load_nas_test_config
 
+ACKNOWLEDGED_SAVE_CONTRACT = "acknowledged_smb_v2"
+
+
+def confirmed_content(result, payload, *, save_contract=None, reconcile=False):
+    """Check the actual role's body evidence; ACK is never a remote checksum."""
+    if (save_contract not in (None, ACKNOWLEDGED_SAVE_CONTRACT)
+            or not isinstance(payload, dict) or type(payload.get("bytes")) is not int
+            or not 0 <= payload["bytes"] < 2 ** 63
+            or not isinstance(payload.get("sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", payload["sha256"]) is None
+            or not isinstance(result, dict) or result.get("outcome") != "committed"
+            or result.get("code") != "committed" or not isinstance(result.get("entry"), dict)
+            or type(result["entry"].get("bytes")) is not int
+            or result["entry"]["bytes"] != payload["bytes"]):
+        return False
+    if save_contract is None:
+        return (result.get("save_contract") is None and result.get("content_evidence") is None
+                and result.get("sha256") == payload["sha256"])
+    evidence = result.get("content_evidence")
+    return (result.get("save_contract") == save_contract and result.get("sha256") is None
+            and result.get("staged") is None
+            and isinstance(evidence, dict) and set(evidence) == {"kind", "bytes", "sha256"}
+            and evidence["kind"] == ("remote_sha256" if reconcile else "smb_acknowledged")
+            and type(evidence["bytes"]) is int and evidence["bytes"] == payload["bytes"]
+            and evidence["sha256"] == payload["sha256"])
+
 
 class MutationTrial:
-    def __init__(self, helper, work, report, save):
+    def __init__(self, helper, work, report, save, *, save_contract=None):
+        if save_contract not in (None, ACKNOWLEDGED_SAVE_CONTRACT):
+            raise BenchmarkError("unsupported trial save contract")
         self.helper, self.work, self.report, self.save = helper, work, report, save
+        self.save_contract = save_contract
         self.files = {}
         self.directories = set()
 
@@ -30,9 +60,13 @@ class MutationTrial:
         request = {"kind": kind, "path": self.path(relative), "operation_id": str(uuid.uuid4()),
                    "parent": self.parent_identity(self.path(relative))}
         if body is not None:
+            if kind not in ("create_file", "replace_file"):
+                raise BenchmarkError("payload requires a file create or replacement")
             source = self.work / (str(uuid.uuid4()) + ".payload")
             source.write_bytes(body)
             request["payload"] = {"source": str(source), "bytes": len(body), "sha256": file_hash(source)}
+            if self.save_contract is not None:
+                request["save_contract"] = self.save_contract
         if expected is not None:
             request["expected"] = expected
         if destination is not None:
@@ -55,8 +89,7 @@ class MutationTrial:
         request = copy.deepcopy(request)
         for _ in range(3):
             result = self.helper.run_request({"type": "mutate", "request": request}).complete["result"]
-            if result.get("operation_id") != request["operation_id"]:
-                raise BenchmarkError("mutation response belongs to a different operation")
+            self.validate_result(request, result)
             if result.get("outcome") == "committed":
                 self.report["commits"].append(copy.deepcopy({"request": request, "result": result}))
                 self.save()
@@ -71,10 +104,44 @@ class MutationTrial:
                     or (result["code"] == "allocated"
                         and (not isinstance(entry, dict)
                              or type(entry.get("bytes")) is not int or entry["bytes"] != 0
+                             or (request.get("save_contract") is not None
+                                 and (artifact.get("save_contract") != request["save_contract"]
+                                      or artifact.get("cleanup_safe") is not True or entry.get("directory") is not False))
                              or re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("security_sha256"))) is None))):
                 raise BenchmarkError("mutation omitted its verified continuation receipt")
             request["receipt"] = {name: result[name] for name in ("staged", "archived") if result.get(name) is not None}
         raise BenchmarkError("mutation did not complete its bounded allocation/preparation continuation")
+
+    @staticmethod
+    def validate_result(request, result, *, reconcile=False):
+        if result.get("operation_id") != request["operation_id"]:
+            raise BenchmarkError("mutation response belongs to a different operation")
+        contract = request.get("save_contract")
+        if contract is None:
+            if result.get("save_contract") is not None or result.get("content_evidence") is not None:
+                raise BenchmarkError("legacy mutation gained a different content contract")
+            return
+        if (contract != ACKNOWLEDGED_SAVE_CONTRACT
+                or result.get("save_contract") != contract or result.get("sha256") is not None
+                or result.get("code") == "prepared"):
+            raise BenchmarkError("mutation did not preserve its acknowledged save contract")
+        if result.get("outcome") != "committed":
+            if result.get("content_evidence") is not None:
+                raise BenchmarkError("uncommitted mutation claimed content evidence")
+            return
+        if not confirmed_content(result, request.get("payload"), save_contract=contract, reconcile=reconcile):
+            raise BenchmarkError("mutation content evidence does not match its actual role; retaining fixture")
+        origin = request.get("receipt", {}).get("staged", {})
+        creator = origin.get("entry", {})
+        entry = result["entry"]
+        if (origin.get("phase") != "allocated" or origin.get("save_contract") != contract
+                or origin.get("cleanup_safe") is not True or creator.get("directory") is not False
+                or entry.get("directory") is not False
+                or type(creator.get("bytes")) is not int or creator["bytes"] != 0
+                or any(type(creator.get(field)) is not int or not 0 < creator[field] < 2 ** 64
+                       or type(entry.get(field)) is not int or entry[field] != creator[field]
+                       for field in ("index_number", "created_filetime"))):
+            raise BenchmarkError("mutation lost its original allocated creator binding")
 
     def verify_bytes(self, relative, digest):
         destination = self.work / (str(uuid.uuid4()) + ".download")
@@ -127,6 +194,7 @@ class MutationTrial:
         if not isinstance(staged, dict):
             raise BenchmarkError("create omitted its saved prepared receipt")
         observed = self.helper.run_request({"type": "reconcile", "request": replay}).complete["result"]
+        self.validate_result(replay, observed, reconcile=True)
         expected_entry = created.get("entry")
         actual_entry = observed.get("entry")
         if (observed.get("operation_id") != initial["operation_id"] or observed.get("outcome") != "committed"
@@ -134,7 +202,7 @@ class MutationTrial:
                 or not isinstance(expected_entry.get("index_number"), int) or expected_entry["index_number"] <= 0
                 or not isinstance(expected_entry.get("created_filetime"), int) or expected_entry["created_filetime"] <= 0
                 or any(actual_entry.get(field) != expected_entry[field] for field in ("index_number", "created_filetime"))
-                or observed.get("sha256") != initial["payload"]["sha256"]):
+                or not confirmed_content(observed, initial["payload"], save_contract=self.save_contract, reconcile=True)):
             raise BenchmarkError("committed create replay did not preserve verified identity and bytes")
         self.verify_bytes(name, initial["payload"]["sha256"])
         self.assert_membership()
@@ -144,11 +212,13 @@ class MutationTrial:
         self.cleanup_receipts(updated)
         # The same saved receipt becomes obsolete after a distinct replacement.
         observed = self.helper.run_request({"type": "reconcile", "request": replay}).complete["result"]
+        self.validate_result(replay, observed, reconcile=True)
         if observed.get("operation_id") != initial["operation_id"] or observed.get("outcome") != "conflict":
             raise BenchmarkError("obsolete create replay failed to notice later replacement")
         # A stale base must preserve the newer NAS bytes and have no side effects.
         stale = self.request("replace_file", name, body=b"stale upload must not win\n", expected=created["entry"])
         refused = self.helper.run_request({"type": "mutate", "request": stale}).complete["result"]
+        self.validate_result(stale, refused)
         if refused.get("operation_id") != stale["operation_id"] or refused.get("outcome") != "conflict":
             raise BenchmarkError("stale base was not refused")
         self.verify_bytes(name, replacement["payload"]["sha256"])
@@ -188,6 +258,10 @@ class MutationTrial:
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--acknowledged-save", action="store_true", help="Use explicit acknowledged_smb_v2 for file payloads")
+    args = parser.parse_args()
+    contract = ACKNOWLEDGED_SAVE_CONTRACT if args.acknowledged_save else None
     target = load_nas_test_config()
     run_id = uuid.uuid4().hex
     work = PROJECT / "Transport/.work/mutation-check" / run_id
@@ -195,6 +269,8 @@ def main():
     binary = PROJECT / "Transport/target/release/nas-transport"
     report = {"target": target, "remote_root": ".mydrive-transport-tests/mutations-" + run_id,
               "binary_sha256": file_hash(binary), "status": "running", "operations": [], "commits": [], "files": {}}
+    if contract is not None:
+        report["save_contract"] = contract
     report_path = work / "report.json"
     def save():
         temporary = report_path.with_suffix(".tmp")
@@ -207,7 +283,7 @@ def main():
     helper = Helper(binary, password, report["remote_root"], report, save,
                     120, target=target)
     try:
-        MutationTrial(helper, work, report, save).run()
+        MutationTrial(helper, work, report, save, save_contract=contract).run()
     except BaseException:
         report["status"] = "inspection_required"
         save()

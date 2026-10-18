@@ -283,6 +283,7 @@ async fn ignored_or_denied_security_at_create_never_uploads_or_archives_bytes() 
             prepared: None,
         };
         let request = mutation::MutationRequest {
+            save_contract: None,
             operation_id: "11111111-2222-4333-8444-555555555555".into(),
             kind: mutation::MutationKind::ReplaceFile,
             path: "file".into(),
@@ -405,6 +406,7 @@ async fn prepared_receipt_observes_and_hashes_the_closed_writer() {
     let cancel = CancellationToken::new();
     let mut verified = VerifiedPayload::open(&payload, &cancel).await.unwrap();
     let mut request = MutationRequest {
+        save_contract: None,
         operation_id: "11111111-2222-4333-8444-555555555555".into(),
         kind: mutation::MutationKind::CreateFile,
         path: "file".into(),
@@ -421,6 +423,7 @@ async fn prepared_receipt_observes_and_hashes_the_closed_writer() {
         receipt: mutation::Receipt::default(),
     };
     request.receipt.staged = Some(mutation::Artifact {
+        save_contract: None,
         path: request.sidecar("stage"),
         entry: Entry {
             name: "stage".into(),

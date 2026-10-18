@@ -37,7 +37,7 @@ extension ProviderTreeImport {
             guard let result = durable.steps[0].result, let entry = result.entry else { throw SMBClientError.invalidResponse }
             try await mutations.checkActive()
             let current = try await mutations.catalog.recordTreeImportProgress(key: status.key,
-                update: .committed(step: step, key: key, entry: entry.observation, sha256: result.sha256))
+                update: .committed(step: step, key: key, entry: entry.observation, sha256: result.sha256, contentEvidence: result.content_evidence))
             await mutations.cleanup(plan: &durable, retirePlan: false)
             return current
         } catch {
@@ -59,7 +59,7 @@ extension ProviderTreeImport {
                 kind: kind == .directory ? .createDirectory : .createFile,
                 path: target, parent: .init(parent),
                 payload: intent.payload.map { .init(source: snapshot.payloadURL($0).path, bytes: $0.size, sha256: $0.sha256) },
-                treeScope: scope)
+                treeScope: scope, saveContract: intent.saveContract)
         case .move:
             guard let source = intent.sourcePath, let target = intent.destinationPath, let scope,
                   let destinationParent, let observed = try await mutations.remote.treeStat(source, scope),
@@ -83,6 +83,12 @@ extension ProviderTreeImport {
               plan.localRecovery == nil, plan.treeImport == nil,
               let target = intent.destinationPath else { throw CocoaError(.fileReadCorruptFile) }
         let request = plan.steps[0].request
+        try request.validate(receipt: request.receipt)
+        try plan.steps[0].result?.validate(for: request)
+        guard request.save_contract == intent.saveContract,
+              request.save_contract == (request.payload == nil ? nil : status.saveContract) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         guard request.parent == .init(parent), request.delete_scope == nil,
               request.tree_scope == (step == .arena ? nil : try treeScope(status)) else { throw CocoaError(.fileReadCorruptFile) }
         switch intent.action {

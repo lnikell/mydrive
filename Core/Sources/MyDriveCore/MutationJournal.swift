@@ -127,6 +127,13 @@ extension Catalog {
                 throw CatalogError.invalidEntry
             }
         }
+        if intent.saveContract != nil {
+            guard intent.payload != nil else { throw CatalogError.invalidEntry }
+            switch intent.action {
+            case .create(_, _, .file), .update: break
+            default: throw CatalogError.invalidEntry
+            }
+        }
         if let base = intent.baseEntry {
             try Self.validateMutationEntry(base)
             guard intent.expectedVersion.map({ Self.exact($0, base.contentVersion) }) == true,

@@ -12,7 +12,8 @@ final class ImportTrial {
     private var sequence: UInt64 = 1_000
     var catalog: Catalog { fixture.catalog }
 
-    init(entries: [TreeImportEntry], name: String = "Document.rtfd", parent: RemoteEntry? = nil) async throws {
+    init(entries: [TreeImportEntry], name: String = "Document.rtfd", parent: RemoteEntry? = nil,
+         saveContract: MutationSaveContract? = nil) async throws {
         fixture = try Fixture(); self.entries = entries
         let parentID: String
         if let parent {
@@ -33,7 +34,8 @@ final class ImportTrial {
         let id = try await fixture.catalog.providerID(forCreateTemplate: template)
         intent = .init(itemID: id, expectedVersion: nil,
             action: .create(parentID: parentID, name: name, kind: .directory),
-            createTemplateID: template, destinationPath: Catalog.treeJoin(scope.parentPath, name), tree: tree)
+            createTemplateID: template, destinationPath: Catalog.treeJoin(scope.parentPath, name), tree: tree,
+            saveContract: saveContract)
     }
 
     @discardableResult func prepare(in catalog: Catalog? = nil) async throws -> TreeImportStatus {
@@ -68,7 +70,10 @@ final class ImportTrial {
             if case .move(let parent, _) = intent.action { objects[intent.itemID] = (parent, entry) }
             return try await catalog.recordTreeImportProgress(key: key,
                 update: .committed(step: step, key: operation.intent.idempotencyKey, entry: entry,
-                                   sha256: step == .create ? intent.payload?.sha256 : nil))
+                    sha256: step == .create && intent.saveContract == nil ? intent.payload?.sha256 : nil,
+                    contentEvidence: intent.saveContract == nil ? nil : intent.payload.map {
+                        .init(kind: .smbAcknowledged, bytes: $0.size, sha256: $0.sha256)
+                    }))
         case .verifyFile(let item, _, let payload):
             guard let entry = objects[item.id]?.entry else { throw CatalogError.invalidEntry }
             return try await catalog.recordTreeImportProgress(key: key,

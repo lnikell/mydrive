@@ -365,9 +365,14 @@ impl Nas {
             Err(Error::ScopeChanged) => return Ok(mutation::scope_changed(request)),
             Err(error) => return Err(error),
         };
-        let result =
+        let mut result =
             mutation::run(&mut io, request, payload.as_mut(), reconcile, &mut progress).await;
-        io.close().await;
+        if request.save_contract.is_some() {
+            let closed = io.close_checked().await;
+            mutation::finish_acknowledged(request, &mut result, closed, cancel);
+        } else {
+            io.close().await;
+        }
         Ok(result)
     }
     pub async fn connect(config: Connection) -> Result<Self> {

@@ -110,7 +110,7 @@ and [stdin decoder](src/request.rs).
 | `delete` | Archive a guarded file for explicit cleanup, or remove an empty directory. Never recursively remove unknown descendants. |
 | `cleanup` | Remove an exact operation artifact using its recorded identity/version and original parent guard. |
 
-File upload has three caller-visible phases:
+Legacy file upload (omitted `save_contract`) has three caller-visible phases:
 
 1. `not_applied` / `allocated`: a zero-byte ordinary sidecar has a creator-confirmed
    identity, creation time and security fingerprint. **No payload bytes precede
@@ -128,7 +128,39 @@ receipts, omitted phase means prepared; omitted cleanup authority means false.
 An interrupted upload can reset/rewrite only its exact allocation-owned sidecar,
 after identity, size, plain-file and security checks. This handles pipelined
 holes without granting truncate authority over documents or archived originals.
-A full remote hash after CLOSE remains mandatory.
+A full remote hash after CLOSE remains mandatory for legacy uploads and uncertain
+outcome reconciliation.
+
+New file uploads can freeze `save_contract: "acknowledged_smb_v2"` before
+allocation. Its zero-byte allocated artifact carries the same contract; an old
+receipt cannot acquire it later. The next invocation holds that exact writer
+through streamed input hashing, complete positive WRITE acknowledgements,
+metadata/security checks, FLUSH and no-replace publication. It checks writer
+CLOSE and a fresh guarded final identity/version before success. There is no
+normal body readback or fabricated Prepared checkpoint. Unexplained finalization
+drift returns uncertainty and preserves the local payload for full-hash recovery.
+
+This contract trusts a compliant authenticated SMB server's successful WRITE and
+FLUSH responses, as ordinary filesystem writes do. It does not independently
+detect a server that acknowledges incorrect stored bytes. Signing remains
+required. A readback would add readable-byte comparison, not physical-media or
+power-loss proof beyond the server's FLUSH contract.
+
+Every V2 outcome echoes `save_contract`; its legacy top-level `sha256` is null.
+A committed V2 result carries closed `content_evidence` with `kind`, `bytes` and
+lowercase `sha256`. Normal success uses `kind: "smb_acknowledged"`; explicit
+full-hash reconciliation uses `"remote_sha256"`. The hash/size must match the
+immutable payload. Noncommitted outcomes have no content evidence. Directory,
+namespace and cleanup operations retain the nil contract. Archived originals
+also retain nil; their receipts describe the old object.
+
+Persist the original Allocated artifact in the V2 request even when the committed
+result clears its staged field. It is creator-origin evidence, never a claim that
+the stage still exists or permission to reset the published destination. A saved
+ACK result without durable Catalog completion requires fresh full-hash
+reconciliation after restart. Completed Catalog receipts replay their original
+observations. Tree file children use this same upload engine; the existing final
+whole-tree body/membership verification remains required.
 
 `outcome` is `committed`, `not_applied`, `conflict` or `uncertain`; `code` explains
 the phase/refusal. Reconcile a lost reply using the frozen intent and durable
@@ -219,7 +251,8 @@ save semantics are outside this transport contract.
   Mutation writes/hashes use eight 64 KiB ranges: pending plus out-of-order
   completed payloads are bounded to 512 KiB, plus a local input buffer. Frames,
   hashing, encryption and runtime copies add memory; these are not RSS ceilings.
-  All integrity passes remain, including complete remote hashes.
+  Strict reads, legacy saves, recovery and final whole-tree verification retain
+  their complete remote hashes. Normal acknowledged saves use the contract above.
 - Listing uses a held directory handle and 64 KiB queries. Missing child index
   numbers require bounded metadata-handle enrichment and observation checks;
   unsupported observations never gain invented identities.
@@ -266,6 +299,21 @@ and fresh generated root. Repository tools `tools/run_nas_check.py` and
 ignored local configuration or the public example, never a password file.
 The mutation harness verifies hashes, exact membership and owned cleanup;
 ambiguity retains evidence. Live reports and endpoint details stay private.
+
+From the repository root, measure complete production file saves with:
+
+```sh
+python3 tools/nas_save_benchmark.py --confirm-test-share --trials 3
+```
+
+It reuses one random 256 MiB fixture across create/replace trials, times allocation
+through finalization, checks independent download hashes and removes only its generated
+objects. Reports stay in ignored `Transport/.work/save-benchmarks/`. Fixture
+generation, independent readback and cleanup are outside the measured save;
+internal save work is included. `--bytes 1` measures small-file fixed costs.
+This is helper-protocol timing, not a Finder/File Provider throughput result.
+The older `nas_benchmark.py` exercise uses legacy diagnostic uploads and cannot
+establish production-save speed.
 
 The ignored Rust contract also accepts `NAS_TEST_ENABLE=1`, `NAS_TEST_HOST`,
 `NAS_TEST_SHARE`, `NAS_TEST_USER` and a fresh

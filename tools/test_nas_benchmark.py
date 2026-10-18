@@ -244,6 +244,27 @@ time.sleep(999)
                     helper.run_request({"type": "mutate", "request": invalid})
             execute.assert_not_called()
 
+    def test_acknowledged_contract_is_closed_and_does_not_expand_the_test_root(self):
+        root = ".mydrive-transport-tests/mutations-123456781234423482341234567890ab"
+        helper = benchmark.Helper(self.helper, b"not-a-real-password", root,
+                                  {"operations": []}, lambda: None, target=PUBLIC_TARGET)
+        request = {"kind": "create_file", "path": root + "/file",
+                   "operation_id": "12345678-1234-4234-8234-1234567890ab",
+                   "parent": {"index_number": 1, "created_filetime": 2},
+                   "payload": {"source": str(self.base / "source"), "bytes": 1, "sha256": "a" * 64},
+                   "save_contract": "acknowledged_smb_v2"}
+        with patch.object(helper, "_execute") as execute:
+            helper.run_request({"type": "mutate", "request": request})
+            wire = json.loads(execute.call_args.args[1])
+            self.assertEqual(wire["operation"]["request"]["save_contract"], "acknowledged_smb_v2")
+            execute.reset_mock()
+            for change in ({"save_contract": "unknown"}, {"save_contract": None},
+                           {"kind": "cleanup"}, {"kind": "create_directory"},
+                           {"payload": None}, {"path": root + "-other/file"}):
+                with self.subTest(change=change), self.assertRaises(benchmark.BenchmarkError):
+                    helper.run_request({"type": "mutate", "request": {**request, **change}})
+            execute.assert_not_called()
+
     @staticmethod
     def finish_partial():
         frames = benchmark.Frames(lambda event: None)

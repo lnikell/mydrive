@@ -36,6 +36,7 @@ struct ProviderTreeImport: Sendable {
         let key = Self.operationKey(rootID: rootID)
         var status = try await mutations.catalog.treeImportStatus(rootID: rootID)
         if let status, status.layoutVersion != 2 { throw legacyLayout() }
+        var saveContract: MutationSaveContract? = .acknowledgedSMBV2
         var candidate: LocalTreeSnapshot?
         if let source = input.contents { candidate = try await LocalTreeSnapshot.capture(source, in: mutations.staging) }
         else { candidate = nil }
@@ -54,6 +55,7 @@ struct ProviderTreeImport: Sendable {
                 try fresh.discard()
             }
             candidate = recovered
+            saveContract = retained.saveContract
         }
         if let existing = status {
             guard existing.parentID == input.parentID, existing.filename.utf8.elementsEqual(input.filename.utf8),
@@ -69,7 +71,7 @@ struct ProviderTreeImport: Sendable {
             }
         } else {
             guard let candidate else { throw MutationInput.unsupported("This folder has no contents available to import. Its local contents are preserved.") }
-            status = try await prepare(input, rootID: rootID, key: key, snapshot: candidate)
+            status = try await prepare(input, rootID: rootID, key: key, snapshot: candidate, saveContract: saveContract)
         }
         guard var current = status else { throw SMBClientError.invalidResponse }
         let aggregate = try TreeWorkProgress.configure(progress, tree: current.tree)
@@ -106,10 +108,10 @@ struct ProviderTreeImport: Sendable {
         return try await complete(current, progress: progress)
     }
 
-    private func prepare(_ input: MutationInput, rootID: String, key: UUID, snapshot: LocalTreeSnapshot) async throws -> TreeImportStatus {
+    private func prepare(_ input: MutationInput, rootID: String, key: UUID, snapshot: LocalTreeSnapshot, saveContract: MutationSaveContract?) async throws -> TreeImportStatus {
         var plan = MutationPlan(key: key, itemID: rootID, parentID: input.parentID,
             filename: input.filename, steps: [], preservedOriginal: nil)
-        plan.treeImport = TreeImportLocalState(tree: snapshot.reference)
+        plan.treeImport = TreeImportLocalState(tree: snapshot.reference, saveContract: saveContract)
         // The requested name and all local bytes survive even a preflight
         // failure. No remote mutation occurs until the Core intake is sealed.
         try mutations.staging.save(plan)
@@ -123,7 +125,7 @@ struct ProviderTreeImport: Sendable {
         }
         let intent = JournalIntent(idempotencyKey: key, itemID: rootID, expectedVersion: nil,
             action: .create(parentID: input.parentID, name: input.filename, kind: .directory),
-            createTemplateID: input.id, destinationPath: destination, tree: snapshot.reference)
+            createTemplateID: input.id, destinationPath: destination, tree: snapshot.reference, saveContract: saveContract)
         let scope = TreeImportScope(parentPath: parentPath,
             parentIdentity: .init(indexNumber: parent.index_number, createdFiletime: parent.created_filetime),
             arenaName: ".mydrive-" + key.uuidString.lowercased() + ".tree")

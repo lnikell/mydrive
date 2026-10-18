@@ -57,6 +57,11 @@ private final class FakeEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
 private struct AdapterTests {
     @MainActor
     static func main() async throws {
+        if CommandLine.arguments == [CommandLine.arguments[0], "--acknowledged-save-only"] {
+            let count = try await MutationAcknowledgedTests.run()
+            print("PASS \(count) acknowledged-save groups; no NAS or registered Domain")
+            return
+        }
         if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--first-directory-visibility-only" {
             var count = try await FirstDirectoryVisibilityTests.run()
             count += try await CatalogRefreshTests.run()
@@ -275,6 +280,7 @@ private struct AdapterTests {
         checkCount += try await FirstDirectoryVisibilityTests.run()
         checkCount += try await DomainVersionTests.run()
         checkCount += try await DomainOperationGateTests.run()
+        checkCount += try await MutationAcknowledgedTests.run()
         checkCount += try await MutationTests.run()
         checkCount += try await MutationRecoveryTests.run()
         checkCount += try await MutationRepresentationTests.run()

@@ -3,6 +3,9 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const OP: &str = "11111111-2222-4333-8444-555555555555";
+
+#[path = "mutation_acknowledged_state_tests.rs"]
+mod acknowledged_state;
 fn entry(name: &str, index: u64) -> Entry {
     Entry {
         name: name.into(),
@@ -17,6 +20,7 @@ fn entry(name: &str, index: u64) -> Entry {
 }
 fn request(kind: MutationKind) -> MutationRequest {
     MutationRequest {
+        save_contract: None,
         operation_id: OP.into(),
         kind,
         path: "folder/file.txt".into(),
@@ -143,6 +147,24 @@ async fn case_and_unicode_alias_renames_reconcile_actual_spelling_without_overwr
     assert_eq!(remote.files["folder/FILE.txt"].1, "other");
 }
 impl Remote for Fake {
+    async fn hash_origin(
+        &mut self,
+        path: &str,
+        expected: &Entry,
+        _origin: &Artifact,
+    ) -> Result<String> {
+        self.hash(path, expected).await
+    }
+    async fn acknowledged_commit(
+        &mut self,
+        _request: &MutationRequest,
+        _origin: &Artifact,
+        _payload: &mut VerifiedPayload,
+        _archived: &mut Option<Artifact>,
+        _progress: &mut dyn FnMut(u64),
+    ) -> Result<Entry> {
+        Err(Error::Smb(smb2::ErrorKind::Unsupported))
+    }
     async fn stat(&mut self, path: &str) -> Result<Option<Entry>> {
         Ok(self
             .stored_path(path)
@@ -180,6 +202,7 @@ impl Remote for Fake {
         self.files
             .insert(path.into(), (entry.clone(), "empty".into()));
         Ok(Artifact {
+            save_contract: request.save_contract,
             path: path.into(),
             entry,
             cleanup_safe: true,
@@ -622,6 +645,7 @@ fn invalid_intents_and_cross_operation_receipts_fail_closed() {
     assert!(wrong.validate().is_err());
     let mut wrong = good.clone();
     wrong.receipt.staged = Some(Artifact {
+        save_contract: None,
         path: "folder/another.stage".into(),
         entry: entry("a", 2),
         cleanup_safe: false,

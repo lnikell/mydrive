@@ -90,6 +90,7 @@ public struct TreeImportStatus: Sendable {
     public let verifiedNodes: Int64
     public let blockedCode: String?
     public let result: MutationCommitResult?
+    public let saveContract: MutationSaveContract?
 }
 
 /// A bounded canonical-journal history page. Typed parents come from immutable
@@ -112,7 +113,8 @@ public enum TreeImportWork: Sendable {
 /// All remote success is attested by the single native callback owner. Core
 /// validates the immutable intent/identity/digest and publishes no private node.
 public enum TreeImportProgress: Sendable {
-    case committed(step: TreeImportStep, key: UUID, entry: RemoteEntry, sha256: String?)
+    case committed(step: TreeImportStep, key: UUID, entry: RemoteEntry, sha256: String?,
+                   contentEvidence: MutationContentEvidence? = nil)
     case fileVerified(itemID: String, entry: RemoteEntry, sha256: String)
     case directoryPage(itemID: String, scanID: UUID, entries: [RemoteEntry])
     case directoryComplete(itemID: String, scanID: UUID, entry: RemoteEntry)

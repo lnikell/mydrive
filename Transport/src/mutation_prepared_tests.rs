@@ -10,6 +10,9 @@ use smb2::{
 };
 use std::time::Duration;
 
+#[path = "mutation_acknowledged_wire_tests.rs"]
+mod acknowledged_wire;
+
 fn entry(path: &str, size: u64, id: u64) -> Entry {
     Entry {
         name: path.rsplit('/').next().unwrap().into(),
@@ -31,6 +34,7 @@ fn security() -> Vec<u8> {
 }
 fn request(replace: bool, body: &[u8]) -> MutationRequest {
     let mut request = MutationRequest {
+        save_contract: None,
         operation_id: "11111111-2222-4333-8444-555555555555".into(),
         kind: if replace {
             mutation::MutationKind::ReplaceFile
@@ -55,6 +59,7 @@ fn request(replace: bool, body: &[u8]) -> MutationRequest {
         receipt: mutation::Receipt::default(),
     };
     request.receipt.staged = Some(mutation::Artifact {
+        save_contract: None,
         path: request.sidecar("stage"),
         entry: entry(&request.sidecar("stage"), body.len() as u64, 10),
         cleanup_safe: true,

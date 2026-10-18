@@ -128,7 +128,8 @@ extension Catalog {
                     arenaPath: arenaPath, payloadPath: row.integer(18) == 2 ? arenaPath : Self.treeJoin(arenaPath, "payload"),
                     destinationPath: Self.treeJoin(scope.parentPath, row.text(6)),
                     arena: try row.optionalText(15).map { try Self.treeDecode(RemoteEntry.self, $0) },
-                    verifiedNodes: row.integer(16), blockedCode: row.optionalText(17), result: try mutationResult(key: key)),
+                    verifiedNodes: row.integer(16), blockedCode: row.optionalText(17), result: try mutationResult(key: key),
+                    saveContract: try operation(key: key)?.intent.saveContract),
                     arenaID: row.text(12), arenaKey: arenaKey, publishKey: publishKey)
             }
     }
