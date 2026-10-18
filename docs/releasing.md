@@ -2,6 +2,8 @@
 
 All checks, builds, signing, notarization and publication run on the release Mac through `tools/release.py`. GitHub hosts [the source and release assets](https://github.com/lnikell/mydrive); there are no GitHub Actions workflows or hosted signing secrets. The tested tools are Swift 6.2.3/macOS SDK 26.2 and Rust 1.93.0. Command Line Tools or Xcode can supply the Apple tools. The release channel is arm64/macOS 15+.
 
+This is direct distribution with Developer ID, not a Mac App Store submission. Apple's notarization service can use an App Store Connect API credential without creating an App Store listing.
+
 ## One-time setup
 
 1. Verify `origin` and `release/config.json` point to the intended repository. Enable the local commit guard with `git config core.hooksPath .githooks`. The source uses MIT. Plans, research, agent instructions, local settings, build output and signing material stay ignored.
@@ -23,6 +25,16 @@ Local settings use this shape; replace the example paths and identity with the i
 ```
 
 The loader accepts only documented nonsecret settings and rejects unknown keys. `MYDRIVE_SPARKLE_KEY_FILE` optionally points to a mode-0600 private export; omitting it uses Keychain account `mydrive-release`. Instead of the notarization profile, supply `MYDRIVE_NOTARY_KEY_PATH`, `MYDRIVE_NOTARY_KEY_ID` and `MYDRIVE_NOTARY_ISSUER_ID`. Store paths and identifiers, never private key contents, passwords or tokens, in the local JSON file.
+
+For API authentication, create a dedicated **team** key with the **Developer** role in App Store Connect's Users and Access → Integrations. Save its one-time `.p8` download in a private local folder, restrict the file to mode 0600, and retain a secure backup. Store it in Keychain with:
+
+```sh
+xcrun notarytool store-credentials mydrive-notary \
+  --key /absolute/private/path/AuthKey_KEYID.p8 \
+  --key-id KEYID --issuer ISSUER_UUID
+```
+
+The command validates access with Apple before saving the credential. Set `MYDRIVE_NOTARY_KEYCHAIN_PROFILE` to `mydrive-notary` in `.local/release.json`. Team keys have access across the account's apps according to their role; this setup does not need an Admin key. Keep the credential on the release Mac and out of the app bundle, repository and GitHub settings.
 
 The original app icon has an editable vector renderer at `tools/render-app-icon.swift`. After changing its geometry, run `xcrun swift tools/render-app-icon.swift .build/icons`, then copy the generated `MyDrive.svg` and `MyDrive.icns` into `MacApp/Resources/`. The normal build includes the checked-in Retina icon in both bundles before signing; it needs no external artwork or icon-generation service.
 
