@@ -32,7 +32,8 @@ class PublicationTests(unittest.TestCase):
                    "nested/.agents/skills/local/SKILL.md", "nested/AGENTS.md", "nested/architecture-review-1.html",
                    "signing.p12", "AuthKey.p8", ".env.local", "update-key", "secrets.json", "PLAN.txt", "notes.html",
                    "dist/MyDrive.app/executable", "Transport/target/helper"]
-        public = ["README.md", "docs/releasing.md", "release/notes/0.2.0.md", "MacApp/File.swift"]
+        public = ["README.md", "docs/releasing.md", "docs/ui-missing-features.md", "release/notes/0.2.0.md",
+                  "MacApp/File.swift"]
         for path in private + public:
             self.write(path, b"example\n")
         self.command("add", ".")

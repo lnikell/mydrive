@@ -12,7 +12,8 @@ PRIVATE_DIRECTORIES = {".agents", ".codex", ".claude", ".build", ".runtime", ".l
                        "planning", "plans", "research", "adr", "__pycache__", "xcuserdata"}
 PRIVATE_SUFFIXES = {".p12", ".pfx", ".pem", ".key", ".p8", ".mobileprovision", ".provisionprofile",
                     ".keychain", ".keychain-db", ".keystore", ".jks", ".cer", ".crt", ".der"}
-PUBLIC_MARKDOWN = {"README.md", "Core/README.md", "Transport/README.md", "docs/releasing.md"}
+PUBLIC_MARKDOWN = {"README.md", "Core/README.md", "Transport/README.md", "docs/releasing.md",
+                   "docs/ui-missing-features.md"}
 PUBLIC_CONFIG_KEYS = {"schema_version", "repository", "team_id", "keychain_access_group", "sparkle_public_key",
                       "app_bundle_id", "provider_bundle_id", "app_group_id"}
 PRIVATE_DOCUMENT_STEMS = {"plan", "plans", "planning", "todo", "notes", "agents", "glossary"}
@@ -50,7 +51,7 @@ def findings(path, data):
     if file.suffix.lower() in PRIVATE_SUFFIXES or file.name.lower().startswith((".env", "id_rsa", "id_ed25519")) \
             or PRIVATE_KEY_NAMES.search(file.name):
         result.append((None, "credential or signing file"))
-    if file.parts[0] == "docs" and path != "docs/releasing.md":
+    if file.parts[0] == "docs" and path not in PUBLIC_MARKDOWN:
         result.append((None, "private planning/research document"))
     is_notes = re.fullmatch(r"release/notes/[0-9]+\.[0-9]+\.[0-9]+\.md", path)
     if file.suffix.lower() == ".md" and path not in PUBLIC_MARKDOWN and not is_notes:

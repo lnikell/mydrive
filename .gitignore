@@ -62,9 +62,11 @@ secrets.json
 .env*
 
 # Keep planning/research and personal agent instructions local.
-# Release instructions are the only public file under docs by default.
+# Release instructions and the UI missing-features list are the only public
+# files under docs.
 /docs/*
 !/docs/releasing.md
+!/docs/ui-missing-features.md
 AGENTS.md
 GLOSSARY.md
 .agents/
