@@ -27,6 +27,7 @@ enum MutationTests {
         count += try await renameReplay()
         count += try await compoundRenameAndMetadataRetry()
         count += try await permanentCleanup()
+        count += try await postCommitCancellation()
         count += try await postCommitCleanup()
         count += try await unsafeArchive()
         count += try await parentIdentity()

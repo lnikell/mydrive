@@ -171,7 +171,6 @@ struct ProviderMutations: Sendable {
             // appear uncommitted. OS callback replay returns this durable receipt.
             staging.discard(operation.intent.payload)
             await cleanup(plan: &plan)
-            try await checkActive()
             transfer.finish {}
             return try completedItem(committed, id: plan.itemID)
         } catch {
