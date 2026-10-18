@@ -176,12 +176,18 @@ impl Handle {
                 return Err(Error::Changed);
             }
         }
+        self.rename_observed(&before, destination).await
+    }
+
+    /// The owning caller has already qualified this same held object. This
+    /// private namespace primitive is shared by ordinary and prepared renames.
+    pub(super) async fn rename_observed(&self, before: &Entry, destination: &str) -> Result<Entry> {
         self.set(10, rename_buffer(destination)).await?;
         let after = self.observe(destination).await?;
-        if !mutation::same_identity(&before, &after)
+        if !mutation::same_identity(before, &after)
             || before.bytes != after.bytes
             || before.modified_filetime != after.modified_filetime
-            || !mutation::same_rename_attributes(&before, &after)
+            || !mutation::same_rename_attributes(before, &after)
         {
             return Err(Error::CommitUncertain);
         }

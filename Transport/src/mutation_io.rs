@@ -42,6 +42,9 @@ mod handle;
 use handle::rename_buffer;
 use handle::{Handle, Open};
 
+#[path = "mutation_prepared.rs"]
+mod prepared;
+
 #[path = "directory_listing.rs"]
 pub(crate) mod listing;
 
@@ -50,6 +53,7 @@ pub(crate) struct MutationIO {
     tree: TreeId,
     cancel: CancellationToken,
     parents: Vec<Handle>,
+    prepared: Option<prepared::PreparedStage>,
 }
 
 impl MutationIO {
@@ -188,6 +192,7 @@ impl MutationIO {
             tree: tree.tree_id,
             cancel: cancel.clone(),
             parents: Vec::new(),
+            prepared: None,
         };
         let result = owner.reserve_ancestors(paths, expected, scope, mode).await;
         if let Err(error) = result {
@@ -282,6 +287,11 @@ impl MutationIO {
 
     pub async fn close_checked(mut self) -> Result<()> {
         let mut failure = None;
+        if let Some(stage) = self.prepared.take() {
+            if let Err(error) = stage.close().await {
+                failure = Some(error);
+            }
+        }
         for parent in self.parents.drain(..).rev() {
             let result = tokio::time::timeout(crate::CLEANUP_TIMEOUT, parent.close())
                 .await
@@ -306,7 +316,26 @@ mod scope_tests;
 #[path = "mutation_tree_scope_tests.rs"]
 mod tree_scope_tests;
 
+#[cfg(test)]
+#[path = "mutation_prepared_tests.rs"]
+mod prepared_tests;
+
 impl Remote for MutationIO {
+    async fn prepare_publication(
+        &mut self,
+        request: &MutationRequest,
+        staged: &mutation::Artifact,
+    ) -> Result<mutation::PreparedStatus> {
+        if self.prepared.is_some() {
+            return Err(Error::Input("publication is already prepared"));
+        }
+        self.prepared = prepared::PreparedStage::verify(self, request, staged).await?;
+        Ok(if self.prepared.is_some() {
+            mutation::PreparedStatus::Verified
+        } else {
+            mutation::PreparedStatus::ContentMismatch
+        })
+    }
     async fn canonical_name(&mut self, path: &str, expected: &Entry) -> Result<String> {
         let handle = self.open(path, Open::Guarded).await?;
         let result = async {
@@ -398,29 +427,11 @@ impl Remote for MutationIO {
         destination: &str,
         staged: &mutation::Artifact,
     ) -> Result<Entry> {
-        let original = self.open(path, Open::SecurityGuarded).await?;
-        let stage = self.open(&staged.path, Open::SecurityGuarded).await?;
-        let result = async {
-            if !mutation::same_version(expected, &original.observe(path).await?)
-                || !mutation::same_version(&staged.entry, &stage.observe(&staged.path).await?)
-            {
-                return Err(Error::Changed);
-            }
-            original
-                .security()
-                .await?
-                .require_same(&stage.security().await?)?;
-            if let Some(expected) = &staged.security_sha256 {
-                if stage.security().await?.fingerprint() != *expected {
-                    return Err(Error::Changed);
-                }
-            }
-            original.rename(path, expected, destination, None).await
-        }
-        .await;
-        let _ = stage.close().await;
-        let _ = original.close().await;
-        result
+        self.prepared
+            .as_ref()
+            .ok_or(Error::Changed)?
+            .archive(self, path, expected, destination, staged)
+            .await
     }
 
     async fn publish(
@@ -430,47 +441,11 @@ impl Remote for MutationIO {
         hash: Option<&str>,
         archived: Option<&mutation::Artifact>,
     ) -> Result<Entry> {
-        let path = &staged.path;
-        let expected = &staged.entry;
-        let stage = self
-            .open(
-                path,
-                if archived.is_some() || staged.security_sha256.is_some() {
-                    Open::SecurityGuarded
-                } else {
-                    Open::Guarded
-                },
-            )
-            .await?;
-        let backup = if let Some(artifact) = archived {
-            let handle = self.open(&artifact.path, Open::SecurityGuarded).await?;
-            if !mutation::same_version(&artifact.entry, &handle.observe(&artifact.path).await?) {
-                return Err(Error::Changed);
-            }
-            Some(handle)
-        } else {
-            None
-        };
-        let result = async {
-            if let Some(expected) = &staged.security_sha256 {
-                if stage.security().await?.fingerprint() != *expected {
-                    return Err(Error::Changed);
-                }
-            }
-            if let Some(backup) = &backup {
-                backup
-                    .security()
-                    .await?
-                    .require_same(&stage.security().await?)?;
-            }
-            stage.rename(path, expected, destination, hash).await
-        }
-        .await;
-        let _ = stage.close().await;
-        if let Some(backup) = backup {
-            let _ = backup.close().await;
-        }
-        result
+        self.prepared
+            .take()
+            .ok_or(Error::Changed)?
+            .publish(self, staged, destination, hash, archived)
+            .await
     }
 
     async fn rename(

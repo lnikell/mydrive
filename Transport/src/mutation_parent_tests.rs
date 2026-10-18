@@ -50,6 +50,7 @@ pub(super) fn owner(connection: Connection, cancel: CancellationToken) -> Mutati
         tree: TreeId(1),
         cancel,
         parents: vec![],
+        prepared: None,
     }
 }
 

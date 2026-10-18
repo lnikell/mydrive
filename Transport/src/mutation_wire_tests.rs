@@ -280,6 +280,7 @@ async fn ignored_or_denied_security_at_create_never_uploads_or_archives_bytes() 
             tree: TreeId(1),
             cancel: CancellationToken::new(),
             parents: vec![],
+            prepared: None,
         };
         let request = mutation::MutationRequest {
             operation_id: "11111111-2222-4333-8444-555555555555".into(),
@@ -445,6 +446,7 @@ async fn prepared_receipt_observes_and_hashes_the_closed_writer() {
         tree: TreeId(1),
         cancel,
         parents: vec![],
+        prepared: None,
     };
     let mut samples = vec![];
     let result = io

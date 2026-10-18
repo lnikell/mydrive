@@ -91,6 +91,7 @@ fn io(connection: Connection) -> MutationIO {
         tree: TreeId(1),
         cancel: CancellationToken::new(),
         parents: vec![],
+        prepared: None,
     }
 }
 fn allocation(request: &MutationRequest) -> Artifact {

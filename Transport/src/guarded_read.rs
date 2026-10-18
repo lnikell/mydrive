@@ -194,7 +194,7 @@ impl Drop for GuardedRead {
     }
 }
 
-struct OpenLifetime(Option<Connection>);
+pub(crate) struct OpenLifetime(pub(crate) Option<Connection>);
 impl Drop for OpenLifetime {
     fn drop(&mut self) {
         if let Some(connection) = &self.0 {

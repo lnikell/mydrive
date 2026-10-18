@@ -110,6 +110,12 @@ pub(crate) use payload::{ensure_local_plain, VerifiedPayload};
 
 // This seam models SMB operations, not paths-as-transactions: each rename/remove
 // implementation holds and checks a same-handle reservation through SET_INFO.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PreparedStatus {
+    Verified,
+    ContentMismatch,
+}
+
 pub(crate) trait Remote {
     async fn stat(&mut self, path: &str) -> Result<Option<Entry>>;
     async fn hash(&mut self, path: &str, expected: &Entry) -> Result<String>;
@@ -130,6 +136,18 @@ pub(crate) trait Remote {
     ) -> Result<Entry>;
     async fn remove(&mut self, path: &str, expected: &Entry) -> Result<()>;
     async fn canonical_name(&mut self, path: &str, expected: &Entry) -> Result<String>;
+    async fn prepare_publication(
+        &mut self,
+        request: &MutationRequest,
+        staged: &Artifact,
+    ) -> Result<PreparedStatus> {
+        if let Some(payload) = &request.payload {
+            if self.hash(&staged.path, &staged.entry).await? != payload.sha256 {
+                return Ok(PreparedStatus::ContentMismatch);
+            }
+        }
+        Ok(PreparedStatus::Verified)
+    }
     async fn move_item(
         &mut self,
         path: &str,
@@ -462,25 +480,33 @@ async fn publish(
             .staged
             .as_ref()
             .is_some_and(|artifact| same_version(&artifact.entry, entry));
-        let verified = if let Some(payload) = &request.payload {
-            !entry.directory
-                && entry.bytes == payload.bytes
-                && remote.hash(&stage_path, entry).await? == payload.sha256
+        let artifact = Artifact {
+            path: stage_path.clone(),
+            entry: entry.clone(),
+            cleanup_safe: durable_artifact_matches(&request.receipt.staged, entry),
+            phase: StagePhase::Prepared,
+            security_sha256: receipt.security_sha256.clone(),
+        };
+        let valid_kind = if let Some(payload) = &request.payload {
+            !entry.directory && entry.bytes == payload.bytes
         } else {
             receipt_match && entry.directory
+        };
+        let verified = if !valid_kind {
+            false
+        } else if receipt_match && !reconcile {
+            remote.prepare_publication(request, &artifact).await? == PreparedStatus::Verified
+        } else if let Some(payload) = &request.payload {
+            remote.hash(&stage_path, entry).await? == payload.sha256
+        } else {
+            true
         };
         if !verified {
             result.outcome = Outcome::Uncertain;
             result.code = "unverified_stage";
             return Ok(());
         }
-        result.receipt.staged = Some(Artifact {
-            path: stage_path.clone(),
-            entry: entry.clone(),
-            cleanup_safe: durable_artifact_matches(&request.receipt.staged, entry),
-            phase: StagePhase::Prepared,
-            security_sha256: receipt.security_sha256.clone(),
-        });
+        result.receipt.staged = Some(artifact);
         if !receipt_match && !reconcile {
             result.outcome = Outcome::NotApplied;
             result.code = "prepared";
