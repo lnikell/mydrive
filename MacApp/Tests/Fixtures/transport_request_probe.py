@@ -133,7 +133,7 @@ def main():
     assert 1 <= len(request["password"].encode("utf-8")) <= 4096
     operation = request["operation"]
     kind = operation["type"]
-    expected = {"probe": {"type"}, "list": {"type", "path"},
+    expected = {"probe": {"type"}, "list": {"type", "path"}, "observed_list": {"type", "path"},
                 "read": {"type", "path", "destination"}, "hydrate": {"type", "path", "destination"}, "stat": {"type", "path"},
                 "mutate": {"type", "request"}, "reconcile": {"type", "request"}}[kind]
     if "delete_scope" in operation:
@@ -168,6 +168,24 @@ def main():
         if operation["path"] == "":
             result["entry"].update(directory=True, attributes=0x10)
         emit({"type": "complete", "result": result})
+    elif kind == "observed_list":
+        mode = operation["path"].rsplit("/", 1)[-1]
+        directory = entry("Caf\u00e9" if mode == "canonical-terminal-name" else mode, 0)
+        directory.update(directory=True, attributes=0x10)
+        if mode == "page-before-start":
+            emit({"type": "page", "entries": [entry("early", 1)]})
+        if mode not in {"missing-start", "missing-start-empty"}:
+            emit({"type": "listing_started", "entry": directory})
+        if mode == "duplicate-start":
+            emit({"type": "listing_started", "entry": directory})
+        if mode == "cancel":
+            emit({"type": "page", "entries": [entry("first", 1)]}); signal.pause(); return
+        if mode not in {"empty", "missing-start-empty"}:
+            emit({"type": "page", "entries": [entry("file-" + str(n), 1) for n in range(300)]})
+        if mode == "replaced-terminal": directory["index_number"] += 1
+        if mode == "canonical-terminal-name": directory["name"] = "Cafe\u0301"
+        if mode == "terminal-file": directory["directory"] = False
+        emit({"type": "complete", "result": {"complete": mode != "incomplete", "entry": directory}})
     elif kind == "list":
         if operation["path"] == "__progress__/wrong-command":
             emit({"type": "progress", "bytes": 1})

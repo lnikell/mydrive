@@ -1,7 +1,7 @@
 //! Bounded QUERY_DIRECTORY and parent observations use the exact same handle.
 //! All ancestors and the listed directory stay reserved until explicit CLOSE.
 use super::{Handle, MutationIO, Open};
-use crate::{CancellationToken, Entry, Error, Listing, Result};
+use crate::{CancellationToken, Entry, Error, Listing, ListingObservation, Result};
 use futures_util::{stream::FuturesOrdered, StreamExt};
 use smb2::{
     client::connection::Connection,
@@ -26,7 +26,31 @@ pub(crate) async fn read(
     limit: Option<usize>,
     scope: Option<&crate::mutation::DeleteScope>,
     cancel: &CancellationToken,
-    page: impl FnMut(Vec<Entry>) -> Result<()>,
+    mut page: impl FnMut(Vec<Entry>) -> Result<()>,
+) -> Result<Listing> {
+    read_observed(
+        connection,
+        tree,
+        path,
+        limit,
+        scope,
+        cancel,
+        |event| match event {
+            ListingObservation::Started(_) => Ok(()),
+            ListingObservation::Page(entries) => page(entries),
+        },
+    )
+    .await
+}
+
+pub(crate) async fn read_observed(
+    connection: Connection,
+    tree: &Tree,
+    path: &str,
+    limit: Option<usize>,
+    scope: Option<&crate::mutation::DeleteScope>,
+    cancel: &CancellationToken,
+    observation: impl FnMut(ListingObservation) -> Result<()>,
 ) -> Result<Listing> {
     if limit == Some(0) {
         return Err(Error::Input("page limit must be positive"));
@@ -34,9 +58,10 @@ pub(crate) async fn read(
     let parents =
         MutationIO::for_scoped_read(connection.clone(), tree, path, scope, cancel).await?;
     let handle = Handle::open(connection, tree.tree_id, path, Open::Enumerate, cancel).await?;
-    read_reserved(handle, Some(parents), path, limit, page).await
+    read_reserved_observed(handle, Some(parents), path, limit, observation).await
 }
 
+#[cfg(test)]
 async fn read_reserved(
     handle: Handle,
     parents: Option<MutationIO>,
@@ -44,11 +69,26 @@ async fn read_reserved(
     limit: Option<usize>,
     mut page: impl FnMut(Vec<Entry>) -> Result<()>,
 ) -> Result<Listing> {
+    read_reserved_observed(handle, parents, path, limit, |event| match event {
+        ListingObservation::Started(_) => Ok(()),
+        ListingObservation::Page(entries) => page(entries),
+    })
+    .await
+}
+
+async fn read_reserved_observed(
+    handle: Handle,
+    parents: Option<MutationIO>,
+    path: &str,
+    limit: Option<usize>,
+    mut observation: impl FnMut(ListingObservation) -> Result<()>,
+) -> Result<Listing> {
     let outcome = async {
         let before = handle.observe(path).await?;
         if !before.directory {
             return Err(Error::Smb(smb2::ErrorKind::NotADirectory));
         }
+        observation(ListingObservation::Started(before.clone()))?;
         let mut class = FileInformationClass::FileIdBothDirectoryInformation;
         let mut count = 0usize;
         let mut pages = 0usize;
@@ -91,7 +131,7 @@ async fn read_reserved(
             let response = QueryDirectoryResponse::unpack(&mut ReadCursor::new(&frame.body))?;
             let entries = enrich(&handle, path, parse(class, &response.output_buffer)?).await?;
             count = count.checked_add(entries.len()).ok_or(Error::Smb(smb2::ErrorKind::TooLarge))?;
-            page(entries)?;
+            observation(ListingObservation::Page(entries))?;
             pages += 1;
             if limit.is_some_and(|limit| pages >= limit) {
                 break false;

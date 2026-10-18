@@ -54,6 +54,7 @@ private struct TransportEvent: Decodable {
     let bytes: Int64?
     let message: String?
     let result: Completion?
+    let entry: SMBEntry?
 
     struct Completion: Decodable, Sendable {
         let complete: Bool?
@@ -87,7 +88,7 @@ private struct TransportEvent: Decodable {
         }
     }
 
-    private enum CodingKeys: String, CodingKey { case type, code, entries, bytes, message, result }
+    private enum CodingKeys: String, CodingKey { case type, code, entries, bytes, message, result, entry }
     init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         type = try values.decode(String.self, forKey: .type)
@@ -96,6 +97,7 @@ private struct TransportEvent: Decodable {
         bytes = try values.decodeIfPresent(Int64.self, forKey: .bytes)
         message = try values.decodeIfPresent(String.self, forKey: .message)
         result = try values.decodeIfPresent(Completion.self, forKey: .result)
+        entry = try values.decodeIfPresent(SMBEntry.self, forKey: .entry)
     }
 }
 
@@ -104,6 +106,7 @@ private struct TransportEvent: Decodable {
 private enum TransportOperation: Encodable, Sendable {
     case probe
     case list(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
+    case observedList(path: String)
     case read(path: String, destination: String, treeScope: SMBTreeScope?)
     case hydrate(path: String, destination: String)
     case stat(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
@@ -114,6 +117,7 @@ private enum TransportOperation: Encodable, Sendable {
         switch self {
         case .probe: "probe"
         case .list: "list"
+        case .observedList: "observed_list"
         case .read: "read"
         case .hydrate: "hydrate"
         case .stat: "stat"
@@ -138,6 +142,8 @@ private enum TransportOperation: Encodable, Sendable {
             try values.encode(path, forKey: .path)
             try values.encodeIfPresent(scope, forKey: .delete_scope)
             try values.encodeIfPresent(treeScope, forKey: .tree_scope)
+        case .observedList(let path):
+            try values.encode(path, forKey: .path)
         case .read(let path, let destination, let treeScope):
             try values.encode(path, forKey: .path)
             try values.encode(destination, forKey: .destination)
@@ -223,6 +229,18 @@ struct SMBClient: Sendable {
             throw SMBClientError.invalidResponse
         }
         return directory
+    }
+
+    /// The receiver binds every page to its initial same-handle observation.
+    func listObservedDirectory(
+        path: String, onPage: @escaping @Sendable (RemoteEntry, [RemoteEntry]) async throws -> Void
+    ) async throws -> RemoteEntry {
+        let result = try await run(.observedList(path: path), onObservedPage: onPage)
+        guard let directory = result?.entry, directory.directory,
+              directory.attributes & 0x400 == 0, directory.objectIdentity != nil else {
+            throw SMBClientError.invalidResponse
+        }
+        return directory.observation
     }
 
     func download(path: String, to destination: URL, treeScope: SMBTreeScope? = nil,
@@ -316,13 +334,14 @@ struct SMBClient: Sendable {
     @discardableResult private func run(_ operation: TransportOperation,
                      passwordOverride: String? = nil,
                      onPage: (@Sendable ([RemoteEntry]) async throws -> Void)? = nil,
-                     progress: (@Sendable (Int64) -> Void)? = nil) async throws -> TransportEvent.Completion? {
+                     progress: (@Sendable (Int64) -> Void)? = nil,
+                     onObservedPage: (@Sendable (RemoteEntry, [RemoteEntry]) async throws -> Void)? = nil) async throws -> TransportEvent.Completion? {
         try Task.checkCancellation()
         #if MYDRIVE_DEVELOPMENT
         if AppStorage.isDevelopmentStorage { try DevelopmentConnectionScope.validate(settings) }
         #endif
         let address = try SMBAddress(server: settings.host, share: settings.share)
-        let receiver = TransportReceiver(command: operation.command, uploadLimit: operation.uploadLimit, onPage: onPage, progress: progress)
+        let receiver = TransportReceiver(command: operation.command, uploadLimit: operation.uploadLimit, onPage: onPage, progress: progress, onObservedPage: onObservedPage)
         #if MYDRIVE_DEVELOPMENT
         let password = try passwordOverride ?? developmentPasswordOverride ?? CredentialStore.password(for: settings)
         let helperURL = try developmentHelperURL ?? AppStorage.transportURL()
@@ -347,6 +366,8 @@ private actor TransportReceiver {
     let uploadLimit: Int64?
     let onPage: (@Sendable ([RemoteEntry]) async throws -> Void)?
     let progress: (@Sendable (Int64) -> Void)?
+    let onObservedPage: (@Sendable (RemoteEntry, [RemoteEntry]) async throws -> Void)?
+    private var listingStart: SMBEntry?
     private var connected = false
     private var complete = false
     private var lastProgress: Int64 = 0
@@ -355,11 +376,13 @@ private actor TransportReceiver {
     private var isDownload: Bool { command == "read" || command == "hydrate" }
 
     init(command: String, uploadLimit: Int64?, onPage: (@Sendable ([RemoteEntry]) async throws -> Void)?,
-         progress: (@Sendable (Int64) -> Void)?) {
+         progress: (@Sendable (Int64) -> Void)?,
+         onObservedPage: (@Sendable (RemoteEntry, [RemoteEntry]) async throws -> Void)?) {
         self.command = command
         self.uploadLimit = uploadLimit
         self.onPage = onPage
         self.progress = progress
+        self.onObservedPage = onObservedPage
     }
 
     func receive(_ data: Data) async throws {
@@ -376,9 +399,24 @@ private actor TransportReceiver {
         }
         guard connected else { throw SMBClientError.invalidResponse }
         switch event.type {
+        case "listing_started":
+            guard command == "observed_list", listingStart == nil,
+                  let directory = event.entry, directory.directory, directory.bytes >= 0,
+                  directory.attributes & 0x10 != 0, directory.attributes & 0x400 == 0,
+                  directory.objectIdentity != nil else { throw SMBClientError.invalidResponse }
+            listingStart = directory
         case "page":
-            guard command == "list", let entries = event.entries else { throw SMBClientError.invalidResponse }
-            try await onPage?(entries.map(\.observation))
+            guard let entries = event.entries else { throw SMBClientError.invalidResponse }
+            if command == "observed_list" {
+                guard let listingStart else { throw SMBClientError.invalidResponse }
+                for offset in stride(from: 0, to: entries.count, by: 128) {
+                    try await onObservedPage?(listingStart.observation,
+                        entries[offset..<min(offset + 128, entries.count)].map(\.observation))
+                }
+            } else {
+                guard command == "list" else { throw SMBClientError.invalidResponse }
+                try await onPage?(entries.map(\.observation))
+            }
         case "progress":
             guard (isDownload || command == "mutate" && uploadLimit != nil),
                   let bytes = event.bytes, bytes >= lastProgress,
@@ -391,7 +429,15 @@ private actor TransportReceiver {
             }
         case "complete":
             guard let result = event.result else { throw SMBClientError.invalidResponse }
-            if command == "list", result.complete != true { throw SMBClientError.invalidResponse }
+            if command == "list" || command == "observed_list" {
+                guard result.complete == true else { throw SMBClientError.invalidResponse }
+            }
+            if command == "observed_list" {
+                guard let start = listingStart, let end = result.entry, end.directory, end.bytes >= 0,
+                      end.attributes & 0x10 != 0,
+                      end.attributes & 0x400 == 0, end.objectIdentity == start.objectIdentity,
+                      end.name.utf8.elementsEqual(start.name.utf8) else { throw SMBClientError.invalidResponse }
+            }
             if isDownload {
                 guard let entry = result.entry, !entry.directory, entry.bytes >= 0,
                       result.bytes == entry.bytes, entry.bytes >= lastProgress else {

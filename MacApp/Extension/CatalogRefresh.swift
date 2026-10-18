@@ -30,10 +30,12 @@ actor CatalogPublication {
 struct CatalogRefresh: Sendable {
     let catalog: Catalog
     let publication: CatalogPublication
-    let list: @Sendable (String, @escaping @Sendable ([RemoteEntry]) async throws -> Void) async throws -> RemoteEntry
+    let list: @Sendable (String, @escaping @Sendable (RemoteEntry, [RemoteEntry]) async throws -> Void) async throws -> RemoteEntry
     let resolve: @Sendable (NSFileProviderError.Code) async throws -> Void
     let notify: @Sendable () async throws -> Void
     let checkActive: @Sendable () async throws -> Void
+
+    var becameVisible: @Sendable () async -> Void = {}
 
     func run(parentID: String, path: String) async throws -> Bool {
         let previousGeneration = try await catalog.generation()
@@ -47,9 +49,12 @@ struct CatalogRefresh: Sendable {
         }
         let scan = try await catalog.beginScan(of: parentID)
         do {
-            let directory = try await list(path) { [catalog] entries in
+            let directory = try await list(path) { [catalog, publication, becameVisible] held, entries in
                 try Task.checkCancellation()
-                try await catalog.stage(entries, in: scan)
+                if try await catalog.stageVisibleAdditions(entries, in: scan, directory: held) {
+                    await publication.record(changed: true)
+                    await becameVisible()
+                }
             }
             try await checkActive()
             guard directory.kind == .directory, let identity = directory.objectIdentity,

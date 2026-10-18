@@ -57,6 +57,12 @@ private final class FakeEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
 private struct AdapterTests {
     @MainActor
     static func main() async throws {
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--first-directory-visibility-only" {
+            var count = try await FirstDirectoryVisibilityTests.run()
+            count += try await CatalogRefreshTests.run()
+            print("PASS \(count) first visibility and canonical refresh groups; no NAS or Domain")
+            return
+        }
         if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--package-capabilities-only" {
             let count = try await PackageCapabilitiesTests.run()
             print("PASS \(count) package capability groups; no NAS or registered Domain")
@@ -266,6 +272,7 @@ private struct AdapterTests {
         checkCount += try ContentFetchProgressTests.run()
         checkCount += try CatalogChangeTests.run()
         checkCount += try await CatalogRefreshTests.run()
+        checkCount += try await FirstDirectoryVisibilityTests.run()
         checkCount += try await DomainVersionTests.run()
         checkCount += try await DomainOperationGateTests.run()
         checkCount += try await MutationTests.run()

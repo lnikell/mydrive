@@ -4,8 +4,15 @@ extension SQLiteConnection {
     func migrate() throws {
         try transaction {
             let version = try scalarInt("PRAGMA user_version")
-            guard (0...8).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
-            guard version != 8 else { return }
+            guard (0...9).contains(version) else { throw CatalogError.unsupportedSchema(Int(version)) }
+            guard version != 9 else {
+                try ensureDirectoryVisibilityIndexes()
+                return
+            }
+            if version == 8 {
+                try migrateDirectoryVisibility()
+                return
+            }
             if version == 1 {
                 try script("""
                     CREATE TABLE IF NOT EXISTS observed_directories (item_id TEXT PRIMARY KEY REFERENCES items(id));
@@ -81,7 +88,21 @@ extension SQLiteConnection {
             if version < 6 { try migrateRecursiveDelete() }
             if version < 7 { try migrateTreeImport() }
             try migrateTreeImportLayout()
-            try execute("PRAGMA user_version = 8")
+            try migrateDirectoryVisibility()
         }
+    }
+
+    private func migrateDirectoryVisibility() throws {
+        // Every pre-v9 marker represents a completed scan. Prefix-only members
+        // require the new version so old readers cannot mistake them for EOF.
+        try execute("ALTER TABLE observed_directories ADD COLUMN is_complete INTEGER NOT NULL DEFAULT 1 CHECK(is_complete IN (0,1))")
+        try ensureDirectoryVisibilityIndexes()
+        try execute("PRAGMA user_version = 9")
+    }
+
+    /// Schema-version compatible: old readers ignore this additive index.
+    private func ensureDirectoryVisibilityIndexes() throws {
+        try execute("CREATE INDEX IF NOT EXISTS items_object_identity ON items(object_index_number, object_created_filetime)")
+        try execute("CREATE INDEX IF NOT EXISTS scan_assigned_items ON scan_entries(scan_id) WHERE item_id IS NOT NULL")
     }
 }

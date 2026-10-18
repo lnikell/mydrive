@@ -172,6 +172,12 @@ pub struct Listing {
     pub entry: Entry,
 }
 
+/// Closed observed-list events. Legacy listing callers receive pages only.
+pub enum ListingObservation {
+    Started(Entry),
+    Page(Vec<Entry>),
+}
+
 #[derive(Debug, Serialize)]
 pub struct Share {
     pub name: String,
@@ -420,6 +426,26 @@ impl Nas {
             scope,
             cancel,
             page,
+        )
+        .await
+    }
+
+    /// Ordinary visibility observes the actual held parent before any page.
+    pub async fn list_observed(
+        &mut self,
+        path: &str,
+        cancel: &CancellationToken,
+        observation: impl FnMut(ListingObservation) -> Result<()>,
+    ) -> Result<Listing> {
+        validate_path(path, true)?;
+        mutation_io::listing::read_observed(
+            self.client.connection().clone(),
+            &self.tree,
+            path,
+            None,
+            None,
+            cancel,
+            observation,
         )
         .await
     }

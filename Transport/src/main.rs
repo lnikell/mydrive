@@ -266,6 +266,26 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
             };
             listing.map(|listing| json!({"entries":listing.entries,"pages":pages,"complete":listing.complete,"entry":listing.entry}))
         }
+        "observed_list" => {
+            let mut pages = 0;
+            nas.list_observed(&args.paths[0], &cancelled, |event| match event {
+                nas_transport::ListingObservation::Started(entry) => {
+                    emit(json!({"type":"listing_started","entry":entry}))
+                }
+                nas_transport::ListingObservation::Page(entries) => {
+                    for entries in entries.chunks(1000) {
+                        pages += 1;
+                        emit(json!({"type":"page","number":pages,"entries":entries}))?;
+                    }
+                    Ok(())
+                }
+            })
+            .await
+            .map(|listing| {
+                json!({"entries":listing.entries,"pages":pages,
+                "complete":listing.complete,"entry":listing.entry})
+            })
+        }
         "read" => {
             let download = if let Some(scope) = &args.tree_scope {
                 nas.download_tree_scoped(

@@ -89,14 +89,14 @@ import Testing
                 try insertTreeTestOperation(historical, in: db, state: .uncertain, fingerprint: false)
             }
             let originalIntent = try db.scalarText("SELECT intent FROM operations WHERE idempotency_key = ?", [.text(initial.key.uuidString)])
-            try db.script("DROP TABLE tree_import_operations; ALTER TABLE tree_imports DROP COLUMN layout_version; PRAGMA user_version=7;")
+            try db.script("ALTER TABLE observed_directories DROP COLUMN is_complete; DROP TABLE tree_import_operations; ALTER TABLE tree_imports DROP COLUMN layout_version; PRAGMA user_version=7;")
             let migrated = try Catalog(databaseURL: trial.fixture.url)
             let legacy = try #require(try await migrated.treeImportStatus(rootID: initial.rootID))
             #expect(legacy.layoutVersion == 1 && legacy.phase == before.phase && legacy.tree == before.tree)
             #expect(legacy.payloadPath == legacy.arenaPath + "/payload")
             #expect(legacy.result == before.result)
             #expect(try db.scalarText("SELECT intent FROM operations WHERE idempotency_key = ?", [.text(initial.key.uuidString)]) == originalIntent)
-            #expect(try db.scalarInt("PRAGMA user_version") == 8)
+            #expect(try db.scalarInt("PRAGMA user_version") == 9)
             if !completed {
                 #expect(try await migrated.treeImportOwner(operationKey: retiredKey)?.key == initial.key)
                 #expect(try await migrated.operation(key: retiredKey)?.state == .uncertain)

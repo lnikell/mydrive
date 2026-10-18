@@ -329,3 +329,64 @@ async fn cancelled_query_releases_owner_without_sending_another_listing_request(
     assert_eq!(count, 1);
     mock.close();
 }
+
+#[tokio::test]
+async fn observed_listing_starts_on_the_held_handle_before_pages_and_failure_never_completes() {
+    for fail_after_page in [false, true] {
+        let (connection, mock) = connection().await;
+        opened(&mock);
+        observed(&mock, 44, 16);
+        reply(
+            &mock,
+            Command::QueryDirectory,
+            &QueryDirectoryResponse {
+                output_buffer: batch(
+                    FileInformationClass::FileIdBothDirectoryInformation,
+                    "first.txt",
+                ),
+            },
+        );
+        if fail_after_page {
+            status(&mock, Command::QueryDirectory, NtStatus::ACCESS_DENIED);
+        } else {
+            status(&mock, Command::QueryDirectory, NtStatus::NO_MORE_FILES);
+            observed(&mock, 44, 16);
+        }
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
+        let mut events = vec![];
+        let result =
+            read_reserved_observed(handle(connection).await, None, "folder", None, |event| {
+                events.push(match event {
+                    ListingObservation::Started(entry) => {
+                        assert_eq!(entry.index_number, Some(44));
+                        "start"
+                    }
+                    ListingObservation::Page(entries) => {
+                        assert_eq!(entries[0].name, "first.txt");
+                        "page"
+                    }
+                });
+                Ok(())
+            })
+            .await;
+        assert_eq!(events, ["start", "page"]);
+        assert_eq!(result.is_err(), fail_after_page);
+        mock.close();
+    }
+}
+
+#[tokio::test]
+async fn rejected_start_closes_handle_without_querying_or_exposing_children() {
+    let (connection, mock) = connection().await;
+    opened(&mock);
+    observed(&mock, 44, 16);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
+    let result = read_reserved_observed(handle(connection).await, None, "folder", None, |event| {
+        assert!(matches!(event, ListingObservation::Started(_)));
+        Err(Error::Changed)
+    })
+    .await;
+    assert!(matches!(result, Err(Error::Changed)));
+    assert_eq!(mock.sent_messages().len(), 5);
+    mock.close();
+}

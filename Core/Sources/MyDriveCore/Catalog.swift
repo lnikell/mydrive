@@ -50,7 +50,7 @@ public actor Catalog {
     public func hasCompletedScan(of parentID: String) throws -> Bool {
         try database.scalarInt("""
             SELECT count(*) FROM observed_directories JOIN items ON items.id = observed_directories.item_id
-            WHERE items.id = ? AND items.kind = 'directory' AND items.is_deleted = 0
+            WHERE items.id = ? AND items.kind = 'directory' AND items.is_deleted = 0 AND observed_directories.is_complete = 1
             """, [.text(parentID)]) != 0
     }
 
@@ -72,8 +72,8 @@ public actor Catalog {
             }
     }
 
-    /// Previously scanned live directories, excluding root, which the coordinator
-    /// refreshes separately. This is a live keyset, not a generation-bound snapshot:
+    /// Live refresh members, including interrupted scans with published positives.
+    /// Root is refreshed separately. This is a live keyset, not a generation-bound snapshot:
     /// new observations before the bookmark are picked up by the next refresh pass.
     public func observedDirectories(afterID: String? = nil, limit: Int = 128) throws -> [CatalogItem] {
         try Self.validatePageSize(limit)

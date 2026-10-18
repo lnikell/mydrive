@@ -39,6 +39,7 @@ the share root.
 | --- | --- | --- |
 | `probe` | None | Authenticated share connection and negotiated security. |
 | `list` | `path`; optional `delete_scope` or `tree_scope` | Bounded pages, then exhaustive completion with the actual held directory's `entry`. |
+| `observed_list` | `path` | One `listing_started` observation from the held directory before bounded pages, then exhaustive completion with the same typed directory identity and byte-exact name. |
 | `stat` | `path`; optional `delete_scope` or `tree_scope` | `entry`, or explicit `null` for a missing path. Permission/metadata failures are errors. |
 | `read` | `path`, new local `destination`; optional `tree_scope` | Strict default-data verification, confirmed `bytes` and same-handle `entry`. Cleans a still-owned partial output on failure. |
 | `hydrate` | `path`, new local `destination` | Full ordinary-file download with the explicit metadata policy below, confirmed `bytes` and same-handle `entry`. No range or scope fields. |

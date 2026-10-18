@@ -101,6 +101,36 @@ private final class ByteSamples: @unchecked Sendable {
         print("PASS hydration cancellation drains the actual helper and unsupported metadata remains a preserving typed error")
     }
 
+    private static func observedListing(_ client: SMBClient) async throws {
+        for mode in ["normal", "empty"] {
+            let batches = ByteSamples()
+            let directory = try await client.listObservedDirectory(path: "__observed__/" + mode) { held, entries in
+                guard held.kind == .directory, held.objectIdentity != nil, entries.count <= 128 else {
+                    throw SMBClientError.invalidResponse
+                }
+                batches.append(Int64(entries.count))
+            }
+            try check(directory.kind == .directory && batches.values == (mode == "empty" ? [] : [128,128,44]),
+                      "Observed listing lost same-handle binding, page bounds or empty completion")
+        }
+        for mode in ["missing-start", "missing-start-empty", "page-before-start", "duplicate-start", "replaced-terminal", "canonical-terminal-name", "terminal-file", "incomplete"] {
+            var refused = false
+            do { _ = try await client.listObservedDirectory(path: "__observed__/" + mode) { _, _ in } }
+            catch SMBClientError.invalidResponse { refused = true }
+            try check(refused, "Malformed observed list was accepted: " + mode)
+        }
+        let first = AsyncStream<Void>.makeStream()
+        let running = Task {
+            defer { first.continuation.finish() }
+            return try await client.listObservedDirectory(path: "__observed__/cancel") { _, _ in first.continuation.yield(()) }
+        }
+        var iterator = first.stream.makeAsyncIterator()
+        try check(await iterator.next() != nil, "Observed cancellation never reached its real page")
+        running.cancel()
+        do { _ = try await running.value; throw SMBClientError.invalidResponse } catch is CancellationError {}
+        print("PASS observed-list actual subprocess start ordering, same-identity terminal, empty/page bounds and cancellation")
+    }
+
     static func main() async throws {
         guard CommandLine.arguments.count == 2 else { throw SMBClientError.invalidResponse }
         let helper = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -172,6 +202,7 @@ private final class ByteSamples: @unchecked Sendable {
         }
         print("PASS URL/default-port drafts validate their canonical authorized target; raw bound aliases and different endpoint/accounts remain refused")
 
+        try await observedListing(client)
         try await client.probe()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("mydrive-transport-request-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

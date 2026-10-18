@@ -21,7 +21,7 @@ actor DomainCoordinator {
     private let operationGate = DomainOperationGate()
     private let catalogPublication = CatalogPublication()
     private let mutationStaging: MutationStaging
-    private var refreshes: [String: Task<Void, Error>] = [:]
+    private var refreshes: [String: DirectoryRefresh] = [:]
     private var reconciliation: Task<Void, Error>?
     private var refreshRetry = RefreshRetryDelay()
     private var invalidated = false
@@ -60,9 +60,9 @@ actor DomainCoordinator {
         let wholePass = reconciliation
         let directories = Array(refreshes.values)
         wholePass?.cancel()
-        directories.forEach { $0.cancel() }
+        directories.forEach { $0.completion.cancel() }
         refreshes.removeAll()
-        for directory in directories { _ = await directory.result }
+        for directory in directories { _ = await directory.completion.result }
         _ = await wholePass?.result
     }
 
@@ -176,15 +176,20 @@ actor DomainCoordinator {
     func children(parentID: String, after cursor: ListingCursor?, limit: Int) async throws -> CatalogPage {
         try checkActive()
         if cursor == nil {
-            if try await catalog.hasCompletedScan(of: parentID) {
+            let completed = try await catalog.hasCompletedScan(of: parentID)
+            let published = try await catalog.hasPublishedChildren(of: parentID)
+            if completed || published {
                 // A cached listing is useful immediately. Refresh publishes its
                 // completed changes through the working-set notification path.
                 startRefresh(parentID: parentID)
             } else {
-                try await refreshDirectory(parentID: parentID)
+                try await directoryRefresh(parentID: parentID).visibility.wait()
             }
         }
-        return try await catalog.children(of: parentID, after: cursor, limit: limit)
+        try checkActive()
+        let page = try await catalog.children(of: parentID, after: cursor, limit: limit)
+        try checkActive()
+        return page
     }
 
     func providerItems(_ models: [CatalogItem]) async throws -> [ProviderItem] {
@@ -497,21 +502,38 @@ actor DomainCoordinator {
     }
 
     private func refreshDirectory(parentID: String) async throws {
-        if let running = refreshes[parentID] {
-            return try await running.value
-        }
+        try await directoryRefresh(parentID: parentID).completion.value
+    }
+
+    private func directoryRefresh(parentID: String) throws -> DirectoryRefresh {
+        if let running = refreshes[parentID] { return running }
         try checkActive()
-        let task = Task { try await self.performRefresh(parentID: parentID) }
-        refreshes[parentID] = task
-        defer { refreshes.removeValue(forKey: parentID) }
-        try await task.value
+        let id = UUID(), visibility = FirstDirectoryVisibility()
+        let task = Task {
+            do {
+                try await self.operationGate.perform {
+                    try await self.performRefreshLocked(parentID: parentID, becameVisible: {
+                        await visibility.resolve(.success(()))
+                    })
+                }
+                await visibility.resolve(.success(()))
+                self.retireRefresh(parentID: parentID, id: id)
+            } catch {
+                await visibility.resolve(.failure(error))
+                self.retireRefresh(parentID: parentID, id: id)
+                throw error
+            }
+        }
+        let entry = DirectoryRefresh(id: id, completion: task, visibility: visibility)
+        refreshes[parentID] = entry
+        return entry
     }
 
-    private func performRefresh(parentID: String) async throws {
-        try await operationGate.perform { try await self.performRefreshLocked(parentID: parentID) }
+    private func retireRefresh(parentID: String, id: UUID) {
+        if refreshes[parentID]?.id == id { refreshes.removeValue(forKey: parentID) }
     }
 
-    private func performRefreshLocked(parentID: String) async throws {
+    private func performRefreshLocked(parentID: String, becameVisible: @escaping @Sendable () async -> Void) async throws {
         // Cached directory pages never await this path. While a retry waits,
         // refreshes[parentID] keeps repeated requests on the same owned task.
         try await refreshRetry.wait()
@@ -521,10 +543,10 @@ actor DomainCoordinator {
         }
         let refresh = CatalogRefresh(catalog: catalog, publication: catalogPublication, list: { path, page in
             let client = try await self.operationClient()
-            return try await client.listDirectory(path: path, pageSize: 128, onPage: page).observation
+            return try await client.listObservedDirectory(path: path, onPage: page)
         }, resolve: { code in try await self.resolveConnectionError(code) },
            notify: { try await self.notifyCatalogChanges() },
-           checkActive: { try await self.checkActive() })
+           checkActive: { try await self.checkActive() }, becameVisible: becameVisible)
         do {
             _ = try await refresh.run(parentID: parentID, path: path)
             refreshRetry.succeeded()

@@ -35,8 +35,9 @@ extension Catalog {
                 }
             }
         try database.execute("""
-            INSERT OR IGNORE INTO observed_directories(item_id)
+            INSERT INTO observed_directories(item_id)
             SELECT item_id FROM tree_import_nodes WHERE operation_key = ? AND kind = 'directory'
+            ON CONFLICT(item_id) DO UPDATE SET is_complete=1
             """, [.text(key.uuidString)])
         try database.execute("UPDATE catalog_state SET generation = generation + 1 WHERE singleton = 1")
         guard let published = try item(id: status.rootID), !published.isDeleted else { throw CatalogError.invalidTransition }

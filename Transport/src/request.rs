@@ -31,6 +31,10 @@ enum Operation {
         #[serde(default)]
         tree_scope: Option<nas_transport::mutation::TreeScope>,
     },
+    #[serde(rename = "observed_list")]
+    ObservedList {
+        path: String,
+    },
     Read {
         path: String,
         destination: String,
@@ -88,6 +92,9 @@ impl Request {
                 delete_scope,
                 tree_scope,
             } if !path.contains('\0') => ("list", vec![path], None, delete_scope, tree_scope),
+            Operation::ObservedList { path } if !path.contains('\0') => {
+                ("observed_list", vec![path], None, None, None)
+            }
             Operation::Read {
                 path,
                 destination,
@@ -163,6 +170,27 @@ mod tests {
 
     fn parse(value: Value) -> Result<(Args, Zeroizing<String>), Error> {
         read(serde_json::to_vec(&value).unwrap().as_slice())
+    }
+
+    #[test]
+    fn observed_listing_is_closed_native_only_and_has_no_scope_or_legacy_flag() {
+        let (args, _) = parse(request(
+            json!({"type":"observed_list","path":"cafe\u{301}"}),
+        ))
+        .unwrap();
+        assert_eq!(args.command, "observed_list");
+        assert_eq!(args.paths[0].as_bytes(), "cafe\u{301}".as_bytes());
+        for field in ["tree_scope", "delete_scope", "pages", "observe", "profile"] {
+            let mut value = request(json!({"type":"observed_list","path":""}));
+            value["operation"][field] = json!({});
+            assert!(parse(value).is_err());
+        }
+        assert!(Args::parse(
+            "--host nas:445 --share test --username test --password-stdin observed_list folder"
+                .split_whitespace()
+                .map(str::to_owned)
+        )
+        .is_err());
     }
 
     #[test]

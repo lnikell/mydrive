@@ -45,7 +45,7 @@ enum CatalogRefreshTests {
         let resolved = ResolvedErrors()
         let publication = CatalogPublication()
         let incomplete = CatalogRefresh(catalog: catalog, publication: publication, list: { _, page in
-            try await page([candidate])
+            try await page(listingDirectory, [candidate])
             throw SMBClientError.serverUnreachable
         }, resolve: { await resolved.append($0) }, notify: {}, checkActive: { try Task.checkCancellation() })
         do { _ = try await incomplete.run(parentID: Catalog.rootID, path: ""); throw CocoaError(.fileReadUnknown) }
@@ -79,7 +79,7 @@ enum CatalogRefreshTests {
         let delivery = RefreshDelivery()
         let retryPublication = CatalogPublication()
         let retry = CatalogRefresh(catalog: catalog, publication: retryPublication, list: { _, page in
-            try await page([candidate])
+            try await page(listingDirectory, [candidate])
             return listingDirectory
         }, resolve: { _ in try await delivery.resolve() }, notify: {
             guard try await catalog.connectionState() == .online else { throw CocoaError(.fileReadCorruptFile) }
@@ -110,7 +110,7 @@ enum CatalogRefreshTests {
         print("PASS a verified mutation notification failure remains pending for an identical refresh without repeating the mutation")
 
         let restarted = CatalogRefresh(catalog: catalog, publication: CatalogPublication(), list: { _, page in
-            try await page([candidate])
+            try await page(listingDirectory, [candidate])
             return listingDirectory
         }, resolve: { _ in throw CocoaError(.fileReadCorruptFile) }, notify: {
             try await delivery.notify()
@@ -139,7 +139,7 @@ enum CatalogRefreshTests {
         try await directoryCatalog.completeScan(oldChildren)
         try await directoryCatalog.setConnectionState(.offline)
         let replacedDirectory = CatalogRefresh(catalog: directoryCatalog, publication: CatalogPublication(), list: { _, page in
-            try await page([candidate])
+            try await page(directory, [candidate])
             return RemoteEntry(name: "Directory", kind: .directory, contentVersion: "replacement", metadataVersion: "replacement", objectIdentity: replacement)
         }, resolve: { _ in throw CocoaError(.fileReadCorruptFile) }, notify: { throw CocoaError(.fileReadCorruptFile) },
             checkActive: { try Task.checkCancellation() })
@@ -179,7 +179,7 @@ enum CatalogRefreshTests {
         let child = RemoteEntry(name: "Created.txt", kind: .file, contentVersion: "bytes", metadataVersion: "attributes", size: 7)
         let refresh = CatalogRefresh(catalog: catalog, publication: CatalogPublication(), list: { path, page in
             guard path == "Folder" else { throw CocoaError(.fileReadCorruptFile) }
-            try await page([child])
+            try await page(initial, [child])
             return terminal
         }, resolve: { _ in throw CocoaError(.fileReadCorruptFile) }, notify: {
             // Finder's wakeup must observe both the new child's metadata and
