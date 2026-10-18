@@ -147,10 +147,16 @@ enum AddMenu {
             .separator,
             .submenu(MountKind.tailscale.addTitle, image: MenuBuilder.badge(.tailscale), entries: [
                 .header("On your tailnet"),
-                .item("Tailscale discovery isn't available yet", enabled: false, action: {}),
+            ] + DiscoveryService.shared.peers.filter(\.tailnet).map { peer in
+                .item(peer.name, tooltip: peer.address, action: {
+                    DiscoveryService.shared.pendingAddress = peer.address
+                    addSMB()
+                })
+            } + [
+                .item(DiscoveryService.shared.status, enabled: false, action: {}),
                 .separator,
-                .item("Scan again", image: MenuBuilder.icon(.sync, size: 15), enabled: false,
-                      tooltip: "Tailscale discovery isn't available yet.", action: {})
+                .item("Scan again", image: MenuBuilder.icon(.sync, size: 15), enabled: !DiscoveryService.shared.scanning,
+                      action: { DiscoveryService.shared.start(); DiscoveryService.shared.scanTailnet() })
             ]),
             .separator,
             .item("Connect to URL…", image: MenuBuilder.icon(.globe), key: "k", action: connectToURL)

@@ -69,6 +69,91 @@ struct ConnectionRemoval {
         return try await manager.getUserVisibleURL(for: .rootContainer)
     }
 
+    func snapshot(measureCache: Bool) async throws -> ProviderSnapshot {
+        let snapshot: ProviderSnapshot = try await readControl { proxy, reply in proxy.snapshot(measureCache, reply: reply) }
+        return try snapshot.validated()
+    }
+
+    func library(scope: LibraryScope, afterID: String?, generation: Int64?) async throws -> LibraryPage {
+        let page: LibraryPage = try await readControl { proxy, reply in
+            proxy.library(scope.rawValue, afterID: afterID, generation: generation.map(NSNumber.init(value:)), reply: reply)
+        }
+        return try page.validated()
+    }
+
+    func clearActivity() async throws {
+        try await control { proxy, reply in
+            proxy.clearActivity { @Sendable error in reply(error.map { .failure($0) } ?? .success(())) }
+        }
+    }
+
+    func resolveActivity(_ id: UUID) async throws {
+        try await control { proxy, reply in
+            proxy.resolveActivity(id.uuidString) { @Sendable error in reply(error.map { .failure($0) } ?? .success(())) }
+        }
+    }
+
+    func setMountOffline(_ keep: Bool) async throws {
+        try await control { proxy, reply in
+            proxy.setMountOffline(keep) { @Sendable error in reply(error.map { .failure($0) } ?? .success(())) }
+        }
+    }
+
+    func maintainCache(bytes: Int64, ageDays: Int) async throws -> Int64 {
+        try await control { proxy, reply in
+            proxy.maintainCache(bytes, ageDays: ageDays) { @Sendable freed, error in
+                reply(error.map { .failure($0) } ?? .success(freed))
+            }
+        }
+    }
+
+    private func readControl<Value: Decodable & Sendable>(
+        _ request: @escaping @MainActor @Sendable (DomainControlProtocol, @escaping (Data?, NSError?) -> Void) -> Void
+    ) async throws -> Value {
+        let bytes: Data = try await control { proxy, complete in
+            request(proxy) { @Sendable data, error in
+                if let error { complete(.failure(error)) }
+                else if let data, data.count <= 2_097_152 { complete(.success(data)) }
+                else { complete(.failure(SMBClientError.invalidResponse)) }
+            }
+        }
+        return try JSONDecoder().decode(Value.self, from: bytes)
+    }
+
+    func setPaused(_ paused: Bool) async throws {
+        guard let manager = NSFileProviderManager(for: domain) else { throw SMBClientError.invalidResponse }
+        if paused { try await manager.disconnect(reason: "Syncing is paused in MyDrive.", options: .temporary) }
+        else { try await manager.reconnect(); try await policyChanged() }
+    }
+
+    func policyChanged() async throws {
+        guard let manager = NSFileProviderManager(for: domain) else { throw SMBClientError.invalidResponse }
+        try await manager.signalErrorResolved(NSFileProviderError(.excludedFromSync))
+        try await manager.signalEnumerator(for: .workingSet)
+    }
+
+    func showItem(_ id: String) async throws {
+        guard let manager = NSFileProviderManager(for: domain) else { throw SMBClientError.invalidResponse }
+        let identifier = id == "root" ? NSFileProviderItemIdentifier.rootContainer : NSFileProviderItemIdentifier(id)
+        let url = try await manager.getUserVisibleURL(for: identifier)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    func retryTransfer(download: Bool, itemID: String) async throws {
+        guard let manager = NSFileProviderManager(for: domain) else { throw SMBClientError.invalidResponse }
+        for code: NSFileProviderError.Code in [.cannotSynchronize, .serverUnreachable, .insufficientQuota, .excludedFromSync] {
+            try await manager.signalErrorResolved(NSFileProviderError(code))
+        }
+        if download {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                manager.requestDownloadForItem(withIdentifier: NSFileProviderItemIdentifier(itemID), requestedRange: nil) { @Sendable error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume() }
+                }
+            }
+        }
+    }
+
     func selectItems() async throws -> [String] {
         let panel = NSOpenPanel()
         panel.directoryURL = try await rootURL()
@@ -111,13 +196,14 @@ struct ConnectionRemoval {
         }
     }
 
-    func offload(_ identifiers: [String]? = nil) async throws -> String {
+    func offload(_ identifiers: [String]? = nil, preservingOffline: Bool = false) async throws -> String {
         if let identifiers, identifiers.isEmpty { return "No files selected." }
         let result: (Int, [String], NSError?) = try await control { proxy, complete in
             let reply: @Sendable (Int, [String], NSError?) -> Void = { count, retained, error in
                 complete(.success((count, retained, error)))
             }
-            if let identifiers { proxy.freeUpSpace(identifiers, reply: reply) }
+            if preservingOffline { proxy.clearCache(reply: reply) }
+            else if let identifiers { proxy.freeUpSpace(identifiers, reply: reply) }
             else { proxy.freeUpAllSpace(reply: reply) }
         }
         let summary = "Freed local downloads for \(result.0) \(result.0 == 1 ? "file" : "files"). NAS originals are retained."

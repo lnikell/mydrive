@@ -21,6 +21,13 @@ extension Catalog {
         return try importRecord(key).status
     }
 
+    /// A read projection of the frozen logical name, never the private scratch
+    /// path. The coordinator uses it for per-file progress presentation only.
+    public func treeImportEntry(key: UUID, itemID: String) throws -> TreeImportEntry? {
+        try Self.validateMutationID(itemID)
+        return try importNode(key, id: itemID)?.spec
+    }
+
     /// New trees only. The already-durable local snapshot is immutable before
     /// preparation. A crash replay returns the canonical tree/payload references.
     public func prepareTreeImport(intent: JournalIntent, scope: TreeImportScope) throws -> TreeImportStatus {

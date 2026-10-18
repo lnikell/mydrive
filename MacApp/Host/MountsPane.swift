@@ -9,6 +9,7 @@ struct MountActions {
     let disconnect: (DriveModel) -> Void
     let perform: (DriveAction, DriveModel) -> Void
     let refreshAll: () -> Void
+    let info: (DriveModel) -> Void
 }
 
 private enum Column {
@@ -73,6 +74,12 @@ private enum Column {
                                 MountRow(drive: drive, isSelected: selection == drive.id, actions: actions,
                                          appBusy: model.busy) { selection = drive.id }
                             }
+                            if kind == nil && query.isEmpty && !DiscoveryService.shared.peers.isEmpty {
+                                GroupHeader(title: "Discovered on your network", count: DiscoveryService.shared.peers.count)
+                                ForEach(DiscoveryService.shared.peers) { peer in
+                                    DiscoveredPeerRow(peer: peer, mount: actions.addSMB)
+                                }
+                            }
                         }
                     }
                     .scrollContentBackground(.hidden)
@@ -82,6 +89,8 @@ private enum Column {
         .onChange(of: model.drives.map(\.id)) { _, ids in
             if let selection, !ids.contains(selection) { self.selection = nil }
         }
+        .onChange(of: model.lastAddedID) { _, id in selection = id }
+        .onAppear { selection = model.lastAddedID }
     }
 
     private var header: some View {
@@ -138,9 +147,10 @@ private enum Column {
             Chip(title: drive.kind.chipTitle).frame(width: Column.kind, alignment: .leading)
             statusCell(health).frame(width: Column.status, alignment: .leading)
             // Per-mount cache size is not reported by the provider yet.
-            Text("—").font(Typography.callout).foregroundStyle(Palette.tertiary)
+            Text(drive.snapshot?.cache.measuredAt == nil ? "—" : ByteCountFormatter.string(fromByteCount: drive.snapshot?.cache.total ?? 0, countStyle: .file))
+                .font(Typography.callout).foregroundStyle(Palette.tertiary)
                 .frame(width: Column.cached, alignment: .leading)
-                .help("Cache size isn't measured yet.")
+                .help("Local downloaded files, including kept-offline files")
             TimelineView(.periodic(from: .now, by: 30)) { context in
                 Text(drive.busy ? "Syncing…" : RelativeTime.short(drive.lastChecked, now: context.date))
                     .font(Typography.callout).foregroundStyle(Palette.secondary)
@@ -194,7 +204,10 @@ private enum Column {
         HStack(spacing: 8) {
             if case let .working(status) = health {
                 ProgressView().controlSize(.mini)
-                Text(status).foregroundStyle(Palette.primary)
+                if let fraction = TransferFormat.fraction(drive.snapshot?.transfers ?? []) {
+                    ProgressBar(value: fraction).frame(width: 60)
+                    Text("\(Int(fraction * 100)) %").foregroundStyle(Palette.primary)
+                } else { Text(status).foregroundStyle(Palette.primary) }
             } else {
                 StatusDot(color: health.color)
                 Text(health.title).foregroundStyle(health.needsAttention ? health.color : Palette.primary)
@@ -209,6 +222,9 @@ private enum Column {
         let drive = self.drive, actions = self.actions
         return [
             .item("Open in Finder", action: { actions.perform(.openFinder, drive) }),
+            .item("Info…", image: MenuBuilder.icon(.info), action: { actions.info(drive) }),
+            .item(drive.isPaused ? "Resume Syncing" : "Pause Syncing", image: MenuBuilder.icon(.pause),
+                  action: { actions.perform(drive.isPaused ? .resume : .pause, drive) }),
             .item("Refresh", action: { actions.perform(.refresh, drive) }),
             .item("Free Up Space", action: { actions.perform(.offloadAll, drive) }),
             .separator,
@@ -250,6 +266,18 @@ private enum Column {
                 ForEach(MountKind.addMenuOrder.filter(\.isAvailable)) { kind in Chip(title: kind.title) }
             }
             .padding(.top, 14)
+            if let peer = DiscoveryService.shared.peers.first {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(peer.tailnet ? "Found on your tailnet" : "Found on your network")
+                        .font(Typography.section).foregroundStyle(Palette.secondary)
+                        .padding(.horizontal, 16).padding(.top, 12)
+                    DiscoveredPeerRow(peer: peer, mount: actions.addSMB)
+                }
+                .frame(width: 420)
+                .background(RoundedRectangle(cornerRadius: 10).fill(Palette.card))
+                .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(Palette.separator, lineWidth: 1))
+                .padding(.top, 20)
+            }
         }
         .padding(.bottom, 40)
         .frame(maxWidth: .infinity, maxHeight: .infinity)

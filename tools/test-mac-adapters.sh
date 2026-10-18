@@ -70,6 +70,14 @@ run_test "$TASK_BUILD/smb-address-tests"
   -lsqlite3 -o "$TASK_BUILD/connection-store-tests"
 run_test "$TASK_BUILD/connection-store-tests"
 
+"${TASK_SWIFT[@]}" -module-name UIFunctionalityTests \
+  -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
+  "$TASK_ROOT"/MacApp/Shared/*.swift "$TASK_ROOT/MacApp/Tests/UIFunctionalityTests.swift" \
+  "$TASK_ROOT/MacApp/Extension/TransferLedger.swift" \
+  "$TASK_BUILD/libMyDriveCore.a" -lsqlite3 -framework FileProvider -framework Security \
+  -o "$TASK_BUILD/ui-functionality-tests"
+run_test "$TASK_BUILD/ui-functionality-tests"
+
 "${TASK_SWIFT[@]}" -module-name ConnectionRemovalStorageTests \
   -I "$TASK_BUILD" -I "$TASK_ROOT/Core/Sources/CSQLite" \
   "$TASK_ROOT/MacApp/Shared/DomainOwnerLease.swift" "$TASK_ROOT/MacApp/Shared/DirectoryContents.swift" "$TASK_ROOT/MacApp/Shared/ConnectionRemovalStorage.swift" \

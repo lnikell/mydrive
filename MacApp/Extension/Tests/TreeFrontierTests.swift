@@ -4,6 +4,7 @@ import MyDriveCore
 
 /// Suspends real MutationPeer RPCs; no substitute journal, transport or clock.
 actor TreeFrontierProbe {
+    private let holdLimit: Int
     private var active = 0
     private var peak = 0
     private var held: [String] = []
@@ -13,11 +14,12 @@ actor TreeFrontierProbe {
     private var released: [String] = []
     private var failed = 0
     private var failureKey: String?
+    init(holdLimit: Int = 4) { self.holdLimit = holdLimit }
 
     func before(_ request: SMBMutationRequest, reconcile: Bool) async throws {
         guard request.tree_scope != nil else { return }
         active += 1; peak = max(peak, active)
-        guard request.kind == .createFile, !reconcile, request.receipt.staged == nil, held.count < 4 else { return }
+        guard request.kind == .createFile, !reconcile, request.receipt.staged == nil, held.count < holdLimit else { return }
         let key = request.operation_id
         held.append(key); began.append(key)
         try await withTaskCancellationHandler {
@@ -61,7 +63,8 @@ enum TreeFrontierTests {
         try await overlapAndReverseOrder()
         try await cancellationDrainsAndReplays()
         try await failureCancelsSiblings()
-        return 3
+        try await configuredEightWorkers()
+        return 4
     }
 
     private static func awaitFour(_ probe: TreeFrontierProbe) async throws -> [String] {
@@ -72,6 +75,31 @@ enum TreeFrontierTests {
             try await Task.sleep(for: .milliseconds(5))
         }
         throw MutationTestFailure(message: "Four independent tree children never overlapped")
+    }
+
+    private static func configuredEightWorkers() async throws {
+        let probe = TreeFrontierProbe(holdLimit: 8)
+        let fixture = try await TreeImportTests.fixture(wide: true, probe: probe, preferences: {
+            var preferences = UserPreferences(); preferences.simultaneousTransfers = 8; return preferences
+        })
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let progress = Progress(totalUnitCount: 1)
+        let task = Task { try await fixture.owner.write(fixture.input, create: true, progress: progress) }
+        do {
+            let deadline = ContinuousClock.now + .seconds(3)
+            while await probe.snapshot().began.count < 8 && ContinuousClock.now < deadline {
+                try await Task.sleep(for: .milliseconds(5))
+            }
+            let state = await probe.snapshot()
+            try mutationCheck(state.active == 8 && state.peak == 8 && state.began.count == 8,
+                              "The configured eight-transfer setting did not reach eight bounded workers")
+            for key in state.began { await probe.release(key) }
+            _ = try await task.value
+            let final = await probe.snapshot()
+            try mutationCheck(progress.isFinished && final.peak == 8,
+                              "The configured frontier exceeded its cap or failed to complete")
+        } catch { task.cancel(); _ = await task.result; throw error }
+        print("PASS the configured eight-transfer setting drives eight real overlapping mutation adapters through complete publication")
     }
 
     private static func awaitReceipt(_ key: String, fixture: TreeImportTests.Fixture) async throws {

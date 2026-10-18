@@ -9,6 +9,8 @@ enum SidebarItem: Hashable {
     @Binding var selection: SidebarItem
     let drives: [DriveModel]
     let activityBadge: Int
+    let cache: CacheUsage
+    let cacheLimitGB: Double
     let openCacheSettings: () -> Void
     let openSettings: () -> Void
 
@@ -24,11 +26,14 @@ enum SidebarItem: Hashable {
             SectionTitle(title: "Library", top: 6)
             NavRow(title: "All Mounts", isSelected: selection == .allMounts,
                    count: drives.isEmpty ? nil : drives.count) { select(.allMounts) } icon: { Icon(.server) }
-            NavRow(title: "Online-only", isSelected: selection == .onlineOnly) { select(.onlineOnly) } icon: { Icon(.cloud) }
-            NavRow(title: "Kept Offline", isSelected: selection == .keptOffline) { select(.keptOffline) } icon: { Icon(.pin) }
+            NavRow(title: "Online-only", isSelected: selection == .onlineOnly,
+                   count: cache.measuredAt == nil ? nil : Int(cache.onlineOnlyCount)) { select(.onlineOnly) } icon: { Icon(.cloud) }
+            NavRow(title: "Kept Offline", isSelected: selection == .keptOffline,
+                   count: cache.measuredAt == nil ? nil : Int(cache.offlineSelectionCount)) { select(.keptOffline) } icon: { Icon(.pin) }
             NavRow(title: "Activity", isSelected: selection == .activity,
                    badge: activityBadge > 0 ? activityBadge : nil) { select(.activity) } icon: { Icon(.activity) }
-            NavRow(title: "Discovered", isSelected: selection == .discovered) { select(.discovered) } icon: { Icon(.tailnet) }
+            NavRow(title: "Discovered", isSelected: selection == .discovered,
+                   count: DiscoveryService.shared.peers.isEmpty ? nil : DiscoveryService.shared.peers.count) { select(.discovered) } icon: { Icon(.tailnet) }
             if !kinds.isEmpty {
                 SectionTitle(title: "Protocols", top: 18)
                 ForEach(kinds) { kind in
@@ -41,7 +46,7 @@ enum SidebarItem: Hashable {
                 }
             }
             Spacer(minLength: 12)
-            LocalCacheCard(action: openCacheSettings)
+            LocalCacheCard(cache: cache, limitGB: cacheLimitGB, action: openCacheSettings)
             Color.clear.frame(height: 8)
             NavRow(title: "Settings", isSelected: false, action: openSettings) { Icon(.settings) }
         }
@@ -117,6 +122,8 @@ private struct NavRow<Leading: View>: View {
 /// "Sidebar/Local Cache": opens Settings › Sync & Cache. Cache usage is not
 /// reported by the provider yet, so the card shows no figure.
 private struct LocalCacheCard: View {
+    let cache: CacheUsage
+    let limitGB: Double
     let action: () -> Void
     @State private var hovering = false
 
@@ -126,9 +133,10 @@ private struct LocalCacheCard: View {
                 HStack {
                     Text("Local cache").font(Typography.callout).foregroundStyle(Palette.secondary)
                     Spacer()
-                    Text("—").font(Typography.calloutMedium).foregroundStyle(Palette.primary)
+                    Text(cache.measuredAt == nil ? "—" : ByteCountFormatter.string(fromByteCount: cache.total, countStyle: .file))
+                        .font(Typography.calloutMedium).foregroundStyle(Palette.primary)
                 }
-                ProgressBar(value: 0)
+                ProgressBar(value: cache.measuredAt == nil ? nil : Double(cache.total) / max(1, limitGB * 1e9))
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
@@ -139,7 +147,7 @@ private struct LocalCacheCard: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
-        .help("Cache usage isn't measured yet. Opens Sync & Cache settings.")
-        .accessibilityLabel("Local cache, usage not available. Open Sync and Cache settings")
+        .help("Local downloaded files. Opens Sync & Cache settings.")
+        .accessibilityLabel("Local cache. Open Sync and Cache settings")
     }
 }

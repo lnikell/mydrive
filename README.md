@@ -10,7 +10,7 @@ Native macOS NAS client in development, using Swift and File Provider for Finder
 - Sparkle 2.10 native update checks and automatic download/install preferences, with local scripts publishing signed and notarized updates to GitHub Releases. Public distribution still needs Apple signing configuration.
 - A replicated File Provider adapter for real NAS listings and on-demand downloads.
 - Journaled ordinary-file uploads, edits, renames and moves, with conflict copies and resumable transfer receipts. Interrupted uploads have recovered across connection loss and provider restart in native Finder tests.
-- A durable, bounded folder-import inventory with at most four concurrent child transfers, destination-depth staging and identity-checked publication. The transport has live dedicated-share qualification; the complete native directory-payload path still needs qualification.
+- A durable, bounded folder-import inventory with one to eight concurrent child transfers (four by default), destination-depth staging and identity-checked publication. The transport has live dedicated-share qualification; the complete native directory-payload path still needs qualification.
 - Finite, durable folder-deletion inventories with identity checks that preserve moved or replaced objects.
 - Finder Keep Downloaded and Free Up Space actions, verified with real files and an unopened nested folder on the UNAS.
 - Native Finder cloud and download-progress indicators, driven by macOS materialization state and real transferred bytes. Progress remains below completion until content validation succeeds.

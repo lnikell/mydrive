@@ -77,10 +77,13 @@ struct ProviderTreeImport: Sendable {
         let aggregate = try TreeWorkProgress.configure(progress, tree: current.tree)
         if current.phase == .published { return try await complete(current, progress: progress) }
         let snapshot = try LocalTreeSnapshot.load(current.tree, in: mutations.staging)
+        var checkedExclusions = try await validateExclusions(snapshot: snapshot, destination: current.destinationPath)
         if current.phase == .building { current = try await freeze(current, snapshot: snapshot) }
         var preparedForVerification = false
         while current.phase != .published {
             try await mutations.checkActive()
+            checkedExclusions = try await validateExclusions(snapshot: snapshot, destination: current.destinationPath,
+                                                             previous: checkedExclusions.excludedPatterns)
             let work = try await mutations.catalog.nextTreeImportWork(key: current.key, limit: 16)
             guard !work.isEmpty else { throw CocoaError(.fileReadCorruptFile) }
             if let publish = work.compactMap({ item -> UUID? in
@@ -88,6 +91,8 @@ struct ProviderTreeImport: Sendable {
                 return nil
             }).first {
                 try await settleChildren(current, publishing: publish)
+                checkedExclusions = try await validateExclusions(snapshot: snapshot, destination: current.destinationPath,
+                                                                 previous: checkedExclusions.excludedPatterns)
             } else if !preparedForVerification, work.contains(where: { item in
                 switch item { case .verifyFile, .verifyDirectory: return true; case .mutation: return false }
             }) {
@@ -95,7 +100,7 @@ struct ProviderTreeImport: Sendable {
                 preparedForVerification = true
             }
             let frontierStatus = current
-            try await TreeImportFrontier.perform(work, progress: aggregate) { item, workProgress in
+            try await TreeImportFrontier.perform(work, progress: aggregate, workerLimit: checkedExclusions.simultaneousTransfers) { item, workProgress in
                 _ = try await perform(item, status: frontierStatus, snapshot: snapshot, progress: workProgress)
             }
             // Every child and its helper is drained before selecting another
@@ -120,6 +125,7 @@ struct ProviderTreeImport: Sendable {
         }
         let parent = try await mutations.preparation.verifiedParent(input.parentID)
         let destination = ProviderMutations.join(parentPath, input.filename)
+        _ = try await validateExclusions(snapshot: snapshot, destination: destination)
         guard try await mutations.remote.stat(destination) == nil else {
             throw try await mutations.preparation.collision(parentID: input.parentID, name: input.filename)
         }
@@ -157,6 +163,10 @@ struct ProviderTreeImport: Sendable {
                          progress: TreeWorkProgress) async throws -> TreeImportStatus {
         switch work {
         case .mutation(let step, let intent, let parent, let destinationParent):
+            if step == .create && intent.payload != nil {
+                return try await uploadFile(step: step, intent: intent, parent: parent,
+                    destinationParent: destinationParent, status: status, snapshot: snapshot, progress: progress)
+            }
             return try await performMutation(step: step, intent: intent, parent: parent,
                 destinationParent: destinationParent, status: status, snapshot: snapshot, progress: progress)
         case .verifyFile(let item, let path, let payload):

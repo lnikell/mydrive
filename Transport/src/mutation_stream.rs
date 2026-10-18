@@ -73,6 +73,7 @@ impl Handle {
     }
 
     async fn read_range(&self, offset: u64, length: u32) -> Result<(u64, Vec<u8>)> {
+        crate::transfer_limits::wait(false, u64::from(length), &self.cancel).await?;
         let frame = self
             .execute(
                 Command::Read,
@@ -163,6 +164,7 @@ impl Handle {
     }
 
     pub(in crate::mutation_io) async fn write_all(&self, offset: u64, bytes: &[u8]) -> Result<()> {
+        crate::transfer_limits::wait(true, bytes.len() as u64, &self.cancel).await?;
         let mut written = 0;
         while written < bytes.len() {
             let frame = self

@@ -1,22 +1,87 @@
 import AppKit
 import FileProvider
 import Foundation
+import Network
 
-enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offloadAll }
+enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offloadAll, clearCache, keepAll, pause, resume, rebuild }
+enum LibraryAction { case showFinder, keepDownloaded, freeUpSpace }
 
 /// The model owns operation lifetime and saved records. This boundary owns the
 /// real framework/credential calls and always receives one immutable endpoint.
 @MainActor protocol DriveConnectionBackend {
     func registeredDomainIDs() async throws -> Set<String>
     func verify(_ settings: ConnectionSettings, password: String) async throws
+    func verifyReachability(_ settings: ConnectionSettings) async throws
     func activate(_ settings: ConnectionSettings, password: String) async throws
     func perform(_ action: DriveAction, settings: ConnectionSettings) async throws -> String
     func remove(_ settings: ConnectionSettings, store: ConnectionStore) async throws -> ConnectionRemoval
+    func disconnectedDomainIDs() async throws -> Set<String>
+    func snapshot(_ settings: ConnectionSettings, measureCache: Bool) async throws -> ProviderSnapshot
+    func library(_ settings: ConnectionSettings, scope: LibraryScope, afterID: String?, generation: Int64?) async throws -> LibraryPage
+    func perform(_ action: LibraryAction, itemID: String, settings: ConnectionSettings) async throws
+    func setVisible(_ visible: Bool, settings: ConnectionSettings) async throws
+}
+
+extension DriveConnectionBackend {
+    func verifyReachability(_ settings: ConnectionSettings) async throws {}
+    func disconnectedDomainIDs() async throws -> Set<String> { [] }
+    func snapshot(_ settings: ConnectionSettings, measureCache: Bool) async throws -> ProviderSnapshot { throw CocoaError(.featureUnsupported) }
+    func library(_ settings: ConnectionSettings, scope: LibraryScope, afterID: String?, generation: Int64?) async throws -> LibraryPage { throw CocoaError(.featureUnsupported) }
+    func perform(_ action: LibraryAction, itemID: String, settings: ConnectionSettings) async throws { throw CocoaError(.featureUnsupported) }
+    func setVisible(_ visible: Bool, settings: ConnectionSettings) async throws { throw CocoaError(.featureUnsupported) }
 }
 
 @MainActor struct SystemDriveConnectionBackend: DriveConnectionBackend {
+    func verifyReachability(_ settings: ConnectionSettings) async throws {
+        let address = try SMBAddress(server: settings.host, share: settings.share)
+        guard let parsed = URLComponents(string: "smb://" + address.endpoint), let host = parsed.host,
+              let port = NWEndpoint.Port(rawValue: UInt16(parsed.port ?? 445)) else { throw SMBClientError.serverUnreachable }
+        let connection = NWConnection(host: NWEndpoint.Host(host.trimmingCharacters(in: CharacterSet(charactersIn: "[]"))), port: port, using: .tcp)
+        let request = DomainControlOperation<Void>(timeout: 10)
+        defer { connection.cancel() }
+        do {
+            try await request.run {
+                connection.stateUpdateHandler = { state in
+                    switch state {
+                    case .ready: request.finish(.success(()))
+                    case .failed: request.finish(.failure(SMBClientError.serverUnreachable))
+                    default: break
+                    }
+                }
+                connection.start(queue: DispatchQueue(label: "local.mydrive.reachability"))
+            }
+        } catch is CancellationError { throw CancellationError() }
+        catch { throw SMBClientError.serverUnreachable }
+    }
+    func setVisible(_ visible: Bool, settings: ConnectionSettings) async throws {
+        let management = DomainManagement(settings: settings)
+        let paused = try await disconnectedDomainIDs().contains(settings.domainID)
+        try await management.register(hidden: !visible)
+        if paused { try await management.setPaused(true) }
+    }
     func registeredDomainIDs() async throws -> Set<String> {
         Set(try await NSFileProviderManager.domains().map { $0.identifier.rawValue })
+    }
+
+    func disconnectedDomainIDs() async throws -> Set<String> {
+        Set(try await NSFileProviderManager.domains().filter(\.isDisconnected).map { $0.identifier.rawValue })
+    }
+
+    func snapshot(_ settings: ConnectionSettings, measureCache: Bool) async throws -> ProviderSnapshot {
+        try await DomainManagement(settings: settings).snapshot(measureCache: measureCache)
+    }
+
+    func library(_ settings: ConnectionSettings, scope: LibraryScope, afterID: String?, generation: Int64?) async throws -> LibraryPage {
+        try await DomainManagement(settings: settings).library(scope: scope, afterID: afterID, generation: generation)
+    }
+
+    func perform(_ action: LibraryAction, itemID: String, settings: ConnectionSettings) async throws {
+        let management = DomainManagement(settings: settings)
+        switch action {
+        case .showFinder: try await management.showItem(itemID)
+        case .keepDownloaded: try await management.keepDownloaded([itemID == "root" ? NSFileProviderItemIdentifier.rootContainer.rawValue : itemID])
+        case .freeUpSpace: _ = try await management.offload([itemID == "root" ? NSFileProviderItemIdentifier.rootContainer.rawValue : itemID])
+        }
     }
 
     func verify(_ settings: ConnectionSettings, password: String) async throws {
@@ -34,6 +99,7 @@ enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offl
         #if MYDRIVE_DEVELOPMENT
         if AppStorage.isDevelopmentStorage {
             try DevelopmentConnectionScope.validate(settings)
+            if try await disconnectedDomainIDs().contains(settings.domainID) { try await management.setPaused(false) }
             try await Self.activateDevelopment(
                 isRegistered: { try await registeredDomainIDs().contains(settings.domainID) },
                 register: { try await management.register(hidden: $0) },
@@ -44,7 +110,10 @@ enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offl
         #endif
         try CredentialStore.save(password, for: settings)
         try Task.checkCancellation()
-        if try await !registeredDomainIDs().contains(settings.domainID) { try await management.register() }
+        if try await !registeredDomainIDs().contains(settings.domainID) {
+            try await management.register(hidden: !AppStorage.preferences(for: settings.domainID).showFinder)
+        }
+        try await management.setPaused(false)
         try Task.checkCancellation()
         try await management.connectionRestored()
     }
@@ -98,6 +167,29 @@ enum DriveAction { case refresh, openFinder, keepSelected, offloadSelected, offl
             return try await management.offload(items)
         case .offloadAll:
             return try await management.offload()
+        case .clearCache:
+            return try await management.offload(preservingOffline: true)
+        case .keepAll:
+            try await management.keepDownloaded([NSFileProviderItemIdentifier.rootContainer.rawValue])
+            return "Requested offline availability for this mount. Finder shows download progress."
+        case .pause:
+            try await management.setPaused(true)
+            return "Syncing paused. Local files are kept."
+        case .resume:
+            try await management.setPaused(false)
+            return "Syncing resumed."
+        case .rebuild:
+            let registered = try await registeredDomainIDs().contains(settings.domainID)
+            let paused = try await disconnectedDomainIDs().contains(settings.domainID)
+            if !registered {
+                guard !AppStorage.isDevelopmentStorage else { throw SMBClientError.authenticationRequired }
+                let password = try CredentialStore.password(for: settings, allowInteraction: false)
+                try await verify(settings, password: password)
+            }
+            try await management.register(hidden: !AppStorage.preferences(for: settings.domainID).showFinder)
+            if paused { try await management.setPaused(true) }
+            else { try await management.connectionRestored() }
+            return "Finder integration rebuilt. Cached files are kept."
         }
     }
 

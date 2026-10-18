@@ -5,6 +5,7 @@ import MyDriveCore
 struct TreeWorkProgress: Sendable {
     private let aggregate: TreeProgressAggregate
     private let id: UUID
+    private var observer: (@Sendable (Int64) -> Void)?
 
     fileprivate init(aggregate: TreeProgressAggregate, id: UUID) {
         self.aggregate = aggregate; self.id = id
@@ -17,13 +18,18 @@ struct TreeWorkProgress: Sendable {
     func received(_ bytes: Int64) {
         guard !Task.isCancelled else { return }
         aggregate.received(bytes, id: id)
+        observer?(bytes)
+    }
+
+    func observing(_ observer: @escaping @Sendable (Int64) -> Void) -> Self {
+        var result = self; result.observer = observer; return result
     }
 
     func finish() { aggregate.finish(id) }
     func abandon() { aggregate.abandon(id) }
 }
 
-/// One lock owns all root Progress writes. At most four active tokens are kept;
+/// One lock owns all root Progress writes. At most eight active tokens are kept;
 /// completed work is a scalar, so memory does not grow with the manifest.
 final class TreeProgressAggregate: @unchecked Sendable {
     private struct Slot { let expected: Int64?; var provisional: Int64 = 0 }
@@ -48,7 +54,7 @@ final class TreeProgressAggregate: @unchecked Sendable {
 
     func begin(expectedBytes: Int64?) throws -> TreeWorkProgress {
         lock.lock(); defer { lock.unlock() }
-        guard active.count < TreeImportFrontier.workerLimit else { throw CocoaError(.fileReadCorruptFile) }
+        guard active.count < TreeImportFrontier.maximumWorkerLimit else { throw CocoaError(.fileReadCorruptFile) }
         let id = UUID(); active[id] = Slot(expected: expectedBytes)
         return TreeWorkProgress(aggregate: self, id: id)
     }

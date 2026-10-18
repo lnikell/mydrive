@@ -5,6 +5,7 @@ enum SMBClientError: LocalizedError, Sendable {
     case authenticationRequired, serverUnreachable, invalidResponse, cancelled
     case permissionDenied, itemMissing, diskFull, changed, unsupportedFeature, scopeChanged
     case localFailure(String), remoteFailure(String)
+    case guestUnsupported, serverPolicy(String)
 
     var errorDescription: String? {
         switch self {
@@ -19,6 +20,8 @@ enum SMBClientError: LocalizedError, Sendable {
         case .unsupportedFeature: "This NAS file uses a feature that MyDrive cannot transfer safely yet."
         case .scopeChanged: "The selected folder moved or was replaced. Refresh the drive before trying again."
         case .localFailure(let message), .remoteFailure(let message): message
+        case .guestUnsupported: "The server signed this account in as a guest. MyDrive requires a named account with signed SMB access."
+        case .serverPolicy(let message): message
         }
     }
 }
@@ -47,6 +50,11 @@ struct SMBEntry: Codable, Equatable, Sendable {
     }
 }
 
+struct SMBShare: Codable, Equatable, Sendable {
+    let name: String
+    let comment: String
+}
+
 private struct TransportEvent: Decodable {
     let type: String
     let code: String?
@@ -57,6 +65,7 @@ private struct TransportEvent: Decodable {
     let entry: SMBEntry?
 
     struct Completion: Decodable, Sendable {
+        let shares: [SMBShare]?
         let complete: Bool?
         let entryPresent: Bool
         let bytes: Int64?
@@ -72,10 +81,12 @@ private struct TransportEvent: Decodable {
         let content_evidence: MutationContentEvidence?
 
         private enum CodingKeys: String, CodingKey {
-            case complete, bytes, entry, operation_id, outcome, code, sha256, cleanup_pending, staged, archived, save_contract, content_evidence
+            case complete, bytes, entry, operation_id, outcome, code, sha256, cleanup_pending, staged, archived, save_contract, content_evidence, shares
         }
         init(from decoder: any Decoder) throws {
             let values = try decoder.container(keyedBy: CodingKeys.self)
+            shares = try values.decodeIfPresent([SMBShare].self, forKey: .shares)
+            guard (shares?.count ?? 0) <= 1000 else { throw SMBClientError.invalidResponse }
             complete = try values.decodeIfPresent(Bool.self, forKey: .complete)
             bytes = try values.decodeIfPresent(Int64.self, forKey: .bytes)
             entryPresent = values.contains(.entry)
@@ -109,6 +120,7 @@ private struct TransportEvent: Decodable {
 /// Process may decompose Unicode in argv; JSON stdin preserves their UTF-8 form.
 private enum TransportOperation: Encodable, Sendable {
     case probe
+    case shares
     case list(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
     case observedList(path: String)
     case read(path: String, destination: String, treeScope: SMBTreeScope?)
@@ -120,6 +132,7 @@ private enum TransportOperation: Encodable, Sendable {
     var command: String {
         switch self {
         case .probe: "probe"
+        case .shares: "shares"
         case .list: "list"
         case .observedList: "observed_list"
         case .read: "read"
@@ -141,7 +154,7 @@ private enum TransportOperation: Encodable, Sendable {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(command, forKey: .type)
         switch self {
-        case .probe: break
+        case .probe, .shares: break
         case .list(let path, let scope, let treeScope), .stat(let path, let scope, let treeScope):
             try values.encode(path, forKey: .path)
             try values.encodeIfPresent(scope, forKey: .delete_scope)
@@ -168,6 +181,13 @@ private struct TransportRequest: Encodable {
     let username: String
     let password: String
     let operation: TransportOperation
+    var limits: Limits?
+
+    struct Limits: Encodable {
+        let download_bps: UInt64?
+        let upload_bps: UInt64?
+        let directory: String
+    }
 
     func encoded() throws -> Data {
         guard (1...4096).contains(password.utf8.count) else { throw SMBClientError.authenticationRequired }
@@ -206,6 +226,12 @@ struct SMBClient: Sendable {
 
     func probe(password: String) async throws {
         try await run(.probe, passwordOverride: password)
+    }
+
+    func listShares(password: String) async throws -> [SMBShare] {
+        guard let shares = try await run(.shares, passwordOverride: password)?.shares else { throw SMBClientError.invalidResponse }
+        return shares.filter { !$0.name.isEmpty && !$0.name.contains("/") && !$0.name.contains("\0") }
+            .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
     }
 
     @discardableResult
@@ -324,13 +350,27 @@ struct SMBClient: Sendable {
         let password = try passwordOverride ?? CredentialStore.password(for: settings)
         let helperURL = try AppStorage.transportURL()
         #endif
-        let input = try TransportRequest(host: address.endpoint, share: address.share,
+        var request = TransportRequest(host: address.endpoint, share: address.share,
                                          username: settings.username, password: password,
-                                         operation: operation).encoded()
-        try await HelperOperation.run(
-            executable: helperURL, arguments: ["--request-stdin"], input: input
-        ) { frame in try await receiver.receive(frame) }
-        return try await receiver.completion()
+                                         operation: operation)
+        let preferences = try AppStorage.preferences(for: settings.domainID)
+        if preferences.limitsApply(), preferences.downloadLimited || preferences.uploadLimited {
+            let options = try MountOptions.load(for: settings.domainID)
+            request.limits = TransportRequest.Limits(
+                download_bps: preferences.downloadLimited ? UInt64(preferences.downloadMBps * 1e6) : nil,
+                upload_bps: preferences.uploadLimited ? UInt64(preferences.uploadMBps * 1e6) : nil,
+                directory: try (options.overrideBandwidth ? AppStorage.folder(for: settings.domainID) : AppStorage.rootURL()).path)
+        }
+        let input = try request.encoded()
+        let invoke: @Sendable () async throws -> TransportEvent.Completion? = {
+            try await HelperOperation.run(executable: helperURL, arguments: ["--request-stdin"], input: input
+            ) { frame in try await receiver.receive(frame) }
+            return try await receiver.completion()
+        }
+        if operation.command == "read" || operation.command == "hydrate" || operation.uploadLimit != nil {
+            return try await TransferConcurrency.shared.perform(limit: preferences.simultaneousTransfers, invoke)
+        }
+        return try await invoke()
     }
 }
 
@@ -434,7 +474,11 @@ private actor TransportReceiver {
     private static func mapError(_ event: TransportEvent) -> SMBClientError {
         let message = event.message ?? "NAS operation failed."
         switch event.code {
-        case "auth_required", "session_expired", "guest_refused": return .authenticationRequired
+        case "auth_required", "session_expired": return .authenticationRequired
+        case "guest_refused": return .guestUnsupported
+        case "unsigned", "signing_required", "signature_invalid":
+            return .serverPolicy("This server could not establish a verified signed SMB session. Check its SMB signing settings.")
+        case "encryption_required": return .serverPolicy("The server did not enable the required SMB encryption.")
         case "cancelled": return .cancelled
         case "access_denied": return .permissionDenied
         case "not_found": return .itemMissing

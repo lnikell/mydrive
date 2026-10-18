@@ -35,6 +35,9 @@ enum ProviderErrors {
             case .diskFull: return CocoaError(.fileWriteOutOfSpace)
             case .changed: return NSFileProviderError(.versionNoLongerAvailable)
             case .unsupportedFeature: return CocoaError(.featureUnsupported)
+            case .guestUnsupported: return NSFileProviderError(.notAuthenticated)
+            case .serverPolicy(let message):
+                return NSFileProviderError(.cannotSynchronize, userInfo: [NSLocalizedDescriptionKey: message])
             case .scopeChanged: return MutationInput.unsupported("The selected folder moved or was replaced. Remaining items and recovery records are preserved.")
             case .localFailure, .remoteFailure: break
             }

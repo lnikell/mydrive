@@ -52,7 +52,8 @@ enum ConnectionRemovalStorage {
 
     private static func hasUnknownEntries(in folder: URL) throws -> Bool {
         let known: Set<String> = ["connection.json", "catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm",
-                                  "catalog.sqlite.owner", "Mutations"]
+                                  "catalog.sqlite.owner", "Mutations", "activity.json", "mount-options.json",
+                                  ".bandwidth-upload", ".bandwidth-download"]
         return try DirectoryContents.contains(in: folder) { name in
             guard known.contains(name) else { return true }
             var info = stat()

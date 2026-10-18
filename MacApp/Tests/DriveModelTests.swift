@@ -102,6 +102,10 @@ private struct DriveTestFailure: LocalizedError {
         await model.startup()
         try check(model.drives.count == 3 && model.loadIssues.count == 1, "Startup lost a saved/pending domain or unconfigured registration evidence")
         let driveA = model.drives.first { $0.id == a.id }!, driveB = model.drives.first { $0.id == b.id }!
+        let sharedEntry = TransferEntry(id: UUID(), itemID: "file", name: "File.txt", direction: .uploading,
+            state: .failed, started: Date(), completed: 0, total: 42, bytesPerSecond: 0, message: "Fixture failure")
+        try check(DriveTransfer(drive: driveA, entry: sharedEntry).id != DriveTransfer(drive: driveB, entry: sharedEntry).id,
+                  "Activity identifiers collided across Connections")
         try check(driveA.isRegistered && driveB.isRegistered && model.drives.first { $0.id == pending.id }?.isRegistered == false,
                   "Startup did not reconcile each saved registration independently")
         try await eventually("Only registered drives should monitor") { clocks.map(\.count).reduce(0, +) == 2 }
@@ -179,11 +183,34 @@ private struct DriveTestFailure: LocalizedError {
         await retryModel.shutdown()
         print("PASS cancelled startup retries registration instead of caching a false disconnected state")
 
+        try await durablePause()
         try await uninstallPreparation()
 
         #if MYDRIVE_DEVELOPMENT
         try await developmentRegistration()
         #endif
+    }
+
+    @MainActor private static func durablePause() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = ConnectionStore(root: root), settings = connection("Paused")
+        try store.save(settings)
+        var options = MountOptions(); options.pauseReason = .user
+        try options.save(in: store.folder(for: settings.id))
+        let backend = FakeDrives(store: store); backend.registered = [settings.id]
+        let clock = DriveWait()
+        let model = AppModel(store: .success(store), backend: backend,
+            makeMonitor: { ConnectionMonitor(wait: clock.sleep) }, launchArguments: [])
+        await model.startup()
+        let drive = model.drives[0]
+        try check(drive.isPaused && drive.pauseReason == .user && backend.actions.contains { $0.1 == .pause } &&
+            !backend.actions.contains { $0.1 == .refresh }, "Provider replacement lost a durable pause or started background work first")
+        try check(await drive.reconnect(password: "synthetic"), "Explicit reconnect of paused drive failed")
+        try check(!drive.isPaused && drive.pauseReason == nil &&
+            MountOptions.load(in: store.folder(for: settings.id)).pauseReason == nil, "Explicit reconnect retained an obsolete pause request")
+        await model.shutdown()
+        print("PASS native registration replacement reapplies a saved pause before monitoring; explicit reconnect clears it")
     }
 
     @MainActor private struct UninstallFixture {

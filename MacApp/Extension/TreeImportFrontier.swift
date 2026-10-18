@@ -5,10 +5,12 @@ import MyDriveCore
 /// Durable journals and receipts remain owned by the existing import callback.
 enum TreeImportFrontier {
     static let workerLimit = 4
+    static let maximumWorkerLimit = 8
 
-    static func perform(_ work: [TreeImportWork], progress: TreeProgressAggregate,
+    static func perform(_ work: [TreeImportWork], progress: TreeProgressAggregate, workerLimit: Int = TreeImportFrontier.workerLimit,
                         operation: @escaping @Sendable (TreeImportWork, TreeWorkProgress) async throws -> Void) async throws {
         try Task.checkCancellation()
+        guard (1...maximumWorkerLimit).contains(workerLimit) else { throw CocoaError(.fileReadCorruptFile) }
         try await withThrowingTaskGroup(of: Void.self) { group in
             var nextIndex = 0
             func addNext() throws {

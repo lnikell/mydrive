@@ -22,6 +22,9 @@ private enum RemovalCheckError: Error { case failed(String) }
 
         let clean = try folder("clean")
         _ = try Catalog(databaseURL: clean.appendingPathComponent("catalog.sqlite"))
+        for name in ["activity.json", "mount-options.json", ".bandwidth-upload", ".bandwidth-download"] {
+            try Data("owned metadata".utf8).write(to: clean.appendingPathComponent(name))
+        }
         try check(try await ConnectionRemovalStorage.clean(folder: clean, preserving: nil) == nil && !exists(clean),
                   "Clean removed domain retained its cache")
 

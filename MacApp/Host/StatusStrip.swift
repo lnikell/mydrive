@@ -11,7 +11,8 @@ import SwiftUI
     let openActivity: () -> Void
 
     private var workingDrive: DriveModel? { model.drives.first(where: \.busy) }
-    private var isWorking: Bool { model.busy || workingDrive != nil }
+    private var transfers: [TransferEntry] { model.transfers.map(\.entry).filter(\.active) }
+    private var isWorking: Bool { model.busy || workingDrive != nil || !transfers.isEmpty }
 
     var isVisible: Bool {
         isWorking || log.latest != nil || !model.status.isEmpty
@@ -19,6 +20,12 @@ import SwiftUI
     }
 
     private var message: (title: String, detail: String?, full: String) {
+        if let active = model.transfers.first(where: { $0.entry.active }) {
+            let verb = active.drive.isPaused ? "Paused" : active.entry.direction == .uploading ? "Uploading to" : "Downloading from"
+            let title = "\(verb) \(active.drive.name)"
+            let detail = TransferFormat.summary(transfers)
+            return (title, detail, title + " · " + detail)
+        }
         if let drive = workingDrive {
             return (drive.status.firstLine.ifEmpty("Working…"), drive.name, drive.status)
         }
@@ -47,6 +54,11 @@ import SwiftUI
                         Text(detail).font(Typography.callout).foregroundStyle(Palette.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 8)
+                    if !transfers.isEmpty {
+                        Button { Task { await model.setAllPaused(!model.allPaused) } } label: {
+                            Icon(model.allPaused ? .sync : .pause, size: 14)
+                        }.buttonStyle(IconButtonStyle()).help(model.allPaused ? "Resume syncing" : "Pause syncing")
+                    }
                     if !model.retainedWork.isEmpty {
                         Button("Show Retained Work…", action: showRetainedWork).buttonStyle(CardButtonStyle())
                     }
@@ -55,7 +67,7 @@ import SwiftUI
                     }
                 }
                 .help(message.full)
-                if isWorking { ProgressBar(value: nil) }
+                if isWorking { ProgressBar(value: TransferFormat.fraction(transfers)) }
             }
             .padding(.horizontal, 20)
             .padding(.top, 12)

@@ -7,10 +7,12 @@ import SwiftUI
     @State private var model = AppModel()
     @State private var updates = UpdateController()
     @State private var requests = WindowRequests()
+    @State private var runtime = ApplicationRuntime()
 
     var body: some Scene {
         Window("MyDrive", id: "connection") {
             MainWindow(model: model, requests: requests)
+                .task { await model.startup(); await runtime.run(model) }
         }
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1200, height: 780)
@@ -39,7 +41,7 @@ import SwiftUI
         Settings {
             SettingsView(updates: updates, model: model) { requestRemoval(.removeAll) }
         }
-        MenuBarExtra("MyDrive", systemImage: "externaldrive.badge.wifi") {
+        MenuBarExtra("MyDrive", systemImage: "externaldrive.badge.wifi", isInserted: model.preference(\.showMenuBar)) {
             Button("Show Mounts") { openWindow(id: "connection") }
             Button("Add SMB Share…", action: requestAdd).disabled(model.busy)
             Button("Connect to URL…", action: requestConnectURL).disabled(model.busy)
@@ -51,6 +53,8 @@ import SwiftUI
                 }
             }
             Divider()
+            Button(model.allPaused ? "Resume Syncing" : "Pause Syncing") { Task { await model.setAllPaused(!model.allPaused) } }
+                .disabled(model.busy || model.drives.isEmpty)
             Button("Check for Updates…") { updates.checkForUpdates() }
                 .disabled(!updates.canCheckForUpdates || model.preparingUninstall)
             Button("Uninstall MyDrive…") { requestRemoval(.uninstall) }

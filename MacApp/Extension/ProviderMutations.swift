@@ -11,12 +11,17 @@ struct ProviderMutations: Sendable {
     let remote: MutationRemote
     let checkActive: @Sendable () async throws -> Void
     let packageRegistryAvailable: @Sendable () -> Bool
+    let preferences: @Sendable () async throws -> UserPreferences
+    let transferActivity: @Sendable (TreeTransferEvent) async -> Void
 
     init(catalog: Catalog, staging: MutationStaging, remote: MutationRemote,
          checkActive: @escaping @Sendable () async throws -> Void,
-         packageRegistryAvailable: @escaping @Sendable () -> Bool = MutationRepresentationPolicy.registryIsAvailable) {
+         packageRegistryAvailable: @escaping @Sendable () -> Bool = MutationRepresentationPolicy.registryIsAvailable,
+         preferences: @escaping @Sendable () async throws -> UserPreferences = { UserPreferences() },
+         transferActivity: @escaping @Sendable (TreeTransferEvent) async -> Void = { _ in }) {
         self.catalog = catalog; self.staging = staging; self.remote = remote
         self.checkActive = checkActive; self.packageRegistryAvailable = packageRegistryAvailable
+        self.preferences = preferences; self.transferActivity = transferActivity
     }
 
     func write(_ requested: MutationInput, create: Bool, progress: Progress) async throws -> CatalogItem {

@@ -18,12 +18,15 @@ struct Request {
     username: String,
     password: Zeroizing<String>,
     operation: Operation,
+    #[serde(default)]
+    limits: nas_transport::transfer_limits::TransferLimits,
 }
 
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum Operation {
     Probe {},
+    Shares {},
     List {
         path: String,
         #[serde(default)]
@@ -73,6 +76,7 @@ pub(super) fn read(input: impl Read) -> Result<(Args, Zeroizing<String>), Error>
 
 impl Request {
     fn into_arguments(self) -> Result<(Args, Zeroizing<String>), Error> {
+        self.limits.validate()?;
         let valid_text = |value: &str| !value.is_empty() && !value.contains('\0');
         if self.version != 1
             || !valid_text(&self.host)
@@ -87,6 +91,7 @@ impl Request {
         }
         let (command, paths, mutation, delete_scope, tree_scope) = match self.operation {
             Operation::Probe {} => ("probe", vec![], None, None, None),
+            Operation::Shares {} => ("shares_native", vec![], None, None, None),
             Operation::List {
                 path,
                 delete_scope,
@@ -152,6 +157,7 @@ impl Request {
                 mutation,
                 delete_scope,
                 tree_scope,
+                limits: self.limits,
             },
             self.password,
         ))

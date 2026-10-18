@@ -8,6 +8,7 @@ struct EvictionReport: Sendable {
     // Unlike individual retained leaves, failure means the pass was incomplete.
     // Removal must leave the connection available rather than skip unseen items.
     let failure: (any Error)?
+    var freedBytes: Int64 = 0
 }
 
 /// The extension owns reconciliation. The host only configures the connection
@@ -21,6 +22,9 @@ actor DomainCoordinator {
     private let operationGate = DomainOperationGate()
     private let catalogPublication = CatalogPublication()
     private let mutationStaging: MutationStaging
+    let activity: TransferLedger
+    var cacheUsage = CacheUsage()
+    private var cacheAttemptedAt = Date.distantPast
     private var refreshes: [String: DirectoryRefresh] = [:]
     private var reconciliation: Task<Void, Error>?
     private var refreshRetry = RefreshRetryDelay()
@@ -28,6 +32,7 @@ actor DomainCoordinator {
     private var changingOfflinePolicy = false
     private var maintenanceCursor: UUID?
     private var mutationMaintenance = MutationMaintenanceReport()
+    private var treeTransfers: [UUID: UUID] = [:]
     #if MYDRIVE_DEVELOPMENT
     private let developmentCredential = DevelopmentCredentialSession()
     private var installingDevelopmentCredential = false
@@ -43,6 +48,7 @@ actor DomainCoordinator {
         guard let initialVersion = openedCatalog.initialDomainVersionState else { throw CocoaError(.fileReadCorruptFile) }
         domainVersionSnapshot = try DomainVersionSnapshot(initialVersion)
         mutationStaging = try MutationStaging(root: catalogURL.deletingLastPathComponent().appendingPathComponent("Mutations", isDirectory: true))
+        activity = TransferLedger(url: catalogURL.deletingLastPathComponent().appendingPathComponent("activity.json"))
         let domain = NSFileProviderDomain(identifier: NSFileProviderDomainIdentifier(identifier), displayName: displayName)
         guard let manager = NSFileProviderManager(for: domain) else {
             throw NSFileProviderError(.providerNotFound)
@@ -164,6 +170,64 @@ actor DomainCoordinator {
     /// inventory. Recovery records remain durable independently of this sample.
     func mutationRecoveryStatus() -> MutationMaintenanceReport { mutationMaintenance }
 
+    func snapshot(measureCache: Bool) async throws -> ProviderSnapshot {
+        try checkActive()
+        if (measureCache || cacheUsage.measuredAt == nil) &&
+            (cacheUsage.measurementError == nil || Date().timeIntervalSince(cacheAttemptedAt) >= 15) {
+            cacheAttemptedAt = Date()
+            do { cacheUsage = try await ProviderInventory.cache(catalog: catalog, manager: manager) }
+            catch is CancellationError { throw CancellationError() }
+            catch { cacheUsage.measurementError = error.localizedDescription }
+        }
+        var transfers = activity.snapshot()
+        var queuedTrees: Set<String> = []
+        // The native callback queue remains the scheduler. Durable intents
+        // supplement active callback telemetry after a provider restart.
+        for operation in try await catalog.replayableOperations(limit: 128)
+            where !transfers.contains(where: { $0.active && $0.itemID == operation.intent.itemID }) {
+            let intent = operation.intent
+            if let tree = try await catalog.treeImportOwner(operationKey: intent.idempotencyKey) {
+                if queuedTrees.insert(tree.rootID).inserted && !transfers.contains(where: { $0.active && $0.itemID == tree.rootID }) {
+                    transfers.append(TransferEntry(id: tree.key, itemID: tree.rootID, name: tree.filename,
+                        direction: .operation, state: .queued, started: Date(), completed: 0, total: 0,
+                        bytesPerSecond: 0, message: "Waiting for Finder to retry folder import", path: tree.destinationPath))
+                }
+                continue
+            }
+            let path = intent.destinationPath ?? intent.sourcePath
+            transfers.append(TransferEntry(id: intent.idempotencyKey, itemID: intent.itemID,
+                name: path?.split(separator: "/").last.map(String.init) ?? intent.itemID,
+                direction: intent.payload == nil ? .operation : .uploading, state: .queued,
+                started: Date(), completed: 0, total: intent.payload?.size ?? 0, bytesPerSecond: 0,
+                message: "Waiting for Finder to retry pending work", path: path))
+        }
+        return ProviderSnapshot(cache: cacheUsage, transfers: Array(transfers.suffix(400)), connection: try await catalog.connectionState().rawValue,
+            rootKeptOffline: try await catalog.offlinePolicy(for: Catalog.rootID) == .keepAvailable,
+            today: try await catalog.transferTotals())
+    }
+
+    func resolveActivity(_ id: UUID) throws {
+        try checkActive()
+        activity.resolve(id)
+    }
+
+    func library(scope: LibraryScope, afterID: String?, generation: Int64?) async throws -> LibraryPage {
+        try checkActive()
+        return try await ProviderInventory.library(catalog: catalog, manager: manager, scope: scope,
+            afterID: afterID, expectedGeneration: generation)
+    }
+
+    func clearActivity() { activity.clearCompleted() }
+
+    func setMountOffline(_ keep: Bool) async throws {
+        if keep { try await keepDownloaded([NSFileProviderItemIdentifier.rootContainer.rawValue]); return }
+        try beginOfflinePolicyChange()
+        defer { changingOfflinePolicy = false }
+        try await catalog.setOfflinePolicy(.onDemand, for: Catalog.rootID)
+        try await manager.signalEnumerator(for: .workingSet)
+        cacheUsage.measuredAt = nil
+    }
+
     func item(id: String) async throws -> ProviderItem {
         try checkActive()
         guard let model = try await catalog.item(id: id), !model.isDeleted,
@@ -233,12 +297,15 @@ actor DomainCoordinator {
               let path = try await catalog.relativePath(id: id) else {
             throw CocoaError(.featureUnsupported)
         }
+        try checkExcluded(path)
         if let version, version != original.itemVersion.contentVersion {
             startRefresh(parentID: original.model.parentID ?? Catalog.rootID)
             throw NSFileProviderError(.versionNoLongerAvailable)
         }
 
         let transfer = ContentFetchProgress(progress, expectedBytes: original.model.entry.size)
+        let activityID = activity.begin(itemID: id, name: original.filename, direction: .downloading, progress: progress,
+                                        expectedBytes: original.model.entry.size, path: path)
         let temporary = try manager.temporaryDirectoryURL().appendingPathComponent(UUID().uuidString)
         do {
             let client = try await operationClient()
@@ -262,8 +329,12 @@ actor DomainCoordinator {
                 }
                 try checkActive()
             }
+            activity.finish(activityID, bytes: downloaded.size)
+            try? await catalog.recordTransfer(itemID: id, version: original.model.entry.contentVersion,
+                upload: false, bytes: downloaded.size)
             return (temporary, original)
         } catch {
+            activity.finish(activityID, error: error)
             try? FileManager.default.removeItem(at: temporary)
             await CatalogRefresh.recordFailure(error, in: catalog)
             throw error
@@ -271,13 +342,33 @@ actor DomainCoordinator {
     }
 
     func write(_ input: MutationInput, create: Bool, progress: Progress) async throws -> ProviderItem {
-        try await operationGate.perform {
-            try await self.performWrite(input, create: create, progress: progress)
+        let parentPath = try? await catalog.relativePath(id: input.parentID)
+        let displayPath = parentPath.map { ProviderMutations.join($0, input.filename) }
+        let activityID = activity.begin(itemID: input.id, name: input.filename,
+            direction: input.contents == nil || input.kind != .file ? .operation : .uploading, progress: progress, path: displayPath)
+        do {
+            let result = try await operationGate.perform {
+                try await self.performWrite(input, create: create, progress: progress)
+            }
+            activity.finish(activityID, name: result.filename, itemID: result.model.id,
+                            conflict: result.filename != input.filename, bytes: result.model.entry.size)
+            if input.kind == .file && input.contents != nil {
+                try? await catalog.recordTransfer(itemID: result.model.id, version: result.model.entry.contentVersion,
+                    upload: true, bytes: result.model.entry.size)
+            } else if input.kind == .directory {
+                try? await catalog.recordPublishedTreeTransfers(rootID: result.model.id)
+            }
+            return result
+        } catch {
+            activity.finish(activityID, error: error)
+            throw error
         }
     }
 
     private func performWrite(_ input: MutationInput, create: Bool, progress: Progress) async throws -> ProviderItem {
         try checkActive()
+        let parentPath = try await catalog.relativePath(id: input.parentID)
+        try checkExcluded([parentPath, input.filename].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "/"))
         let result: CatalogItem
         do { result = try await mutationAdapter().write(input, create: create, progress: progress) }
         catch { await recordMutationFailure(error); throw error }
@@ -311,6 +402,7 @@ actor DomainCoordinator {
     private func performDelete(id: String, contentVersion: Data, metadataVersion: Data,
                                requestContext: DeletionRequestContext?, progress: Progress) async throws {
         try checkActive()
+        if let path = try await catalog.relativePath(id: id) { try checkExcluded(path) }
         do {
             if let requestContext, requestContext.recursive,
                let item = try await catalog.item(id: id), item.entry.kind == .directory {
@@ -339,7 +431,19 @@ actor DomainCoordinator {
     private func mutationAdapter() -> ProviderMutations {
         ProviderMutations(catalog: catalog, staging: mutationStaging,
                           remote: MutationRemote(client: { try await self.operationClient() }),
-                          checkActive: { try await self.checkActive() })
+                          checkActive: { try await self.checkActive() },
+                          preferences: { try await self.currentPreferences() },
+                          transferActivity: { event in await self.observeTreeTransfer(event) })
+    }
+
+    private func observeTreeTransfer(_ event: TreeTransferEvent) {
+        switch event {
+        case .started(let id, let itemID, let path, let bytes, let progress):
+            treeTransfers[id] = activity.begin(itemID: itemID, name: path.split(separator: "/").last.map(String.init) ?? itemID,
+                direction: .uploading, progress: progress, expectedBytes: bytes, path: path)
+        case .finished(let id, let error):
+            if let transfer = treeTransfers.removeValue(forKey: id) { activity.finish(transfer, error: error) }
+        }
     }
 
     private func recordMutationFailure(_ error: Error) async {
@@ -374,7 +478,8 @@ actor DomainCoordinator {
         }
     }
 
-    func freeUpSpace(_ identifiers: [String]?) async throws -> EvictionReport {
+    func freeUpSpace(_ identifiers: [String]?, preservingOffline: Bool = false,
+                     byteBudget: Int64? = nil, olderThan: Date? = nil) async throws -> EvictionReport {
         try beginOfflinePolicyChange()
         defer { changingOfflinePolicy = false }
         let roots: [String]
@@ -390,7 +495,7 @@ actor DomainCoordinator {
             guard let path = try await catalog.relativePath(id: root) else { throw ProviderErrors.noSuchItem() }
             prefixes.append(path)
         }
-        for root in roots {
+        for root in roots where !preservingOffline {
             try checkActive()
             try await catalog.clearOfflineSelections(in: root)
         }
@@ -399,6 +504,7 @@ actor DomainCoordinator {
 
         let policyEviction = PolicyAwareEviction()
         var evicted = 0
+        var freed: Int64 = 0
         var retained = 0
         var messages: [String] = []
         let enumerator = manager.enumeratorForMaterializedItems()
@@ -414,6 +520,13 @@ actor DomainCoordinator {
                     guard let model = try await catalog.item(id: id), model.entry.kind == .file,
                           let path = try await catalog.relativePath(id: id),
                           prefixes.contains(where: { $0.isEmpty || path == $0 || path.hasPrefix($0 + "/") }) else { continue }
+                    if preservingOffline, try await catalog.offlinePolicy(for: id) == .keepAvailable { continue }
+                    let metadata = try? await ReplicaMetadata.read(id, manager: manager)
+                    if byteBudget != nil || olderThan != nil {
+                        guard let metadata, metadata.downloaded else { continue }
+                        let oldEnough = olderThan.map { metadata.lastOpened < $0 } ?? false
+                        guard oldEnough || freed < (byteBudget ?? 0) else { continue }
+                    }
                     try checkActive()
                     do {
                         let result = try await policyEviction.evict(
@@ -422,7 +535,12 @@ actor DomainCoordinator {
                             },
                             checkActive: { try await self.checkActive() },
                             attempt: { try await self.evictFile(id: id) })
-                        if result == .evicted { evicted += 1 }
+                        if result == .evicted {
+                            evicted += 1
+                            if let metadata, let after = try? await ReplicaMetadata.read(id, manager: manager) {
+                                freed += max(0, metadata.allocated - after.allocated)
+                            }
+                        }
                         else {
                             retained += 1
                             if messages.count < 100 {
@@ -442,12 +560,13 @@ actor DomainCoordinator {
                 page = next
             } while true
         } catch {
-            return EvictionReport(completed: evicted, retained: messages, failure: error)
+            return EvictionReport(completed: evicted, retained: messages, failure: error, freedBytes: freed)
         }
         if retained > messages.count {
             messages.append("\(retained - messages.count) additional files retained.")
         }
-        return EvictionReport(completed: evicted, retained: messages, failure: nil)
+        cacheUsage.measuredAt = nil
+        return EvictionReport(completed: evicted, retained: messages, failure: nil, freedBytes: freed)
     }
 
     /// Uses only native cache metadata and OS eviction. Writes may still be
@@ -573,6 +692,18 @@ actor DomainCoordinator {
     private func checkActive() throws {
         try Task.checkCancellation()
         if invalidated { throw CancellationError() }
+    }
+
+    private func checkExcluded(_ path: String) throws {
+        if try currentPreferences().excludes(path) {
+            throw NSFileProviderError(.excludedFromSync, userInfo: [
+                NSLocalizedDescriptionKey: "This path matches a Never sync rule. Its local and server copies are kept."])
+        }
+    }
+
+    private func currentPreferences() throws -> UserPreferences {
+        try checkActive()
+        return try AppStorage.preferences(for: settings.domainID)
     }
 
     private func beginOfflinePolicyChange() throws {

@@ -29,6 +29,8 @@ struct ConnectionSheetRequest: Identifiable {
     @State private var showingConnectURL = false
     @State private var removal: RemovalMode?
     @State private var quitRequested = false
+    @State private var inspecting: DriveModel?
+    @State private var reconnectAfterInfo: DriveModel?
 
     var body: some View {
         presentations(lifecycle(layout))
@@ -36,7 +38,7 @@ struct ConnectionSheetRequest: Identifiable {
 
     private var layout: some View {
         HStack(spacing: 0) {
-            Sidebar(selection: $selection, drives: model.drives, activityBadge: activityBadge,
+            Sidebar(selection: $selection, drives: model.drives, activityBadge: activityBadge, cache: model.cacheUsage, cacheLimitGB: model.preferences.maximumCacheGB,
                     openCacheSettings: { settingsTab = .syncCache; openSettings() },
                     openSettings: { openSettings() })
             VStack(spacing: 0) {
@@ -68,11 +70,12 @@ struct ConnectionSheetRequest: Identifiable {
                 if case let .kind(kind) = selection, !kinds.contains(kind) { selection = .allMounts }
             }
             .onChange(of: requests.add) { _, _ in presentRequestedAdd() }
+            .onChange(of: model.lastAddedID) { _, id in if id != nil { selection = .allMounts; query = "" } }
             .onChange(of: requests.connectToURL) { _, _ in presentRequestedConnectURL() }
             .onChange(of: requests.removal) { _, _ in presentRequestedRemoval() }
             .onChange(of: model.busy) { _, busy in
                 log.observeApp(status: model.status, busy: busy)
-                if !busy { presentRequestedRemoval() }
+                if !busy { presentRequestedAdd(); presentRequestedConnectURL(); presentRequestedRemoval() }
             }
             .onChange(of: showingLoadIssues) { _, showing in if !showing { presentRequestedRemoval() } }
             .onChange(of: removingDrive?.id) { _, id in if id == nil { presentRequestedRemoval() } }
@@ -80,6 +83,14 @@ struct ConnectionSheetRequest: Identifiable {
 
     private func presentations(_ view: some View) -> some View {
         dialogs(view
+            .sheet(item: $inspecting, onDismiss: {
+                if let drive = reconnectAfterInfo {
+                    reconnectAfterInfo = nil
+                    sheet = ConnectionSheetRequest(settings: drive.settings, drive: drive)
+                } else { presentRequestedRemoval() }
+            }) { drive in
+                MountInfoSheet(drive: drive) { reconnectAfterInfo = drive }
+            }
             .sheet(item: $sheet, onDismiss: presentRequestedRemoval) { request in
                 DriveConnectionSheet(model: model, settings: request.settings, drive: request.drive)
             }
@@ -133,14 +144,11 @@ struct ConnectionSheetRequest: Identifiable {
             ActivityPane(model: model, log: log, actions: actions,
                          showRetainedWork: { showingRetainedWork = true }, showLoadIssues: { showingLoadIssues = true })
         case .onlineOnly:
-            PlaceholderPane(title: "Online-only", icon: .cloud, heading: "Online-only files",
-                            message: "Files stay on your servers until you open them. A list of online-only files isn't available in MyDrive yet.")
+            LibraryPane(model: model, scope: .onlineOnly).id(LibraryScope.onlineOnly)
         case .keptOffline:
-            PlaceholderPane(title: "Kept Offline", icon: .pin, heading: "Kept-offline files",
-                            message: "Choose Keep Downloaded on a file or folder in Finder to keep it on this Mac. A list of kept-offline files isn't available in MyDrive yet.")
+            LibraryPane(model: model, scope: .keptOffline).id(LibraryScope.keptOffline)
         case .discovered:
-            PlaceholderPane(title: "Discovered", icon: .tailnet, heading: "No discovered servers",
-                            message: "Finding servers and Tailscale peers on your network isn't available yet. Add a mount with its address instead.")
+            DiscoveredPane(mount: presentAdd)
         }
     }
 
@@ -160,7 +168,7 @@ struct ConnectionSheetRequest: Identifiable {
                         await model.perform(.refresh, on: drive)
                     }
                 }
-            })
+            }, info: { drive in inspecting = drive })
     }
 
     private var snapshots: [ActivityLog.Snapshot] {
@@ -172,12 +180,17 @@ struct ConnectionSheetRequest: Identifiable {
     }
 
     private var canPresent: Bool {
-        !model.busy && removal == nil && sheet == nil && removingDrive == nil && !showingConnectURL
+        !model.busy && removal == nil && sheet == nil && removingDrive == nil && !showingConnectURL && inspecting == nil
     }
 
     private func presentAdd() {
         guard canPresent else { return }
-        sheet = ConnectionSheetRequest(settings: model.makeDraft(), drive: nil)
+        var draft = model.makeDraft()
+        if let address = DiscoveryService.shared.pendingAddress {
+            draft.host = address
+            DiscoveryService.shared.pendingAddress = nil
+        }
+        sheet = ConnectionSheetRequest(settings: draft, drive: nil)
     }
 
     private func presentConnectURL() {
@@ -199,7 +212,7 @@ struct ConnectionSheetRequest: Identifiable {
 
     private func presentRequestedRemoval() {
         guard let mode = requests.removal, !model.busy, sheet == nil, removingDrive == nil,
-              !showingRetainedWork, !showingLoadIssues, !showingConnectURL, removal == nil else { return }
+              !showingRetainedWork, !showingLoadIssues, !showingConnectURL, inspecting == nil, removal == nil else { return }
         requests.removal = nil
         removal = mode
     }

@@ -107,6 +107,7 @@ impl GuardedRead {
         let mut bytes = Vec::with_capacity(length as usize);
         while (bytes.len() as u64) < length {
             let count = (length - bytes.len() as u64).min(u64::from(self.max_read)) as u32;
+            crate::transfer_limits::wait(false, u64::from(count), &self.cancel).await?;
             let request = ReadRequest {
                 padding: 0x50,
                 flags: 0,

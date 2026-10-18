@@ -21,6 +21,7 @@ mod mutation_io;
 mod mutation_security;
 #[cfg(test)]
 mod test_wire;
+pub mod transfer_limits;
 
 pub const CHUNK_BYTES: usize = 256 * 1024;
 pub const READ_WINDOW: usize = 8;

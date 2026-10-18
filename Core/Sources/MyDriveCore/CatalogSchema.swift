@@ -104,5 +104,9 @@ extension SQLiteConnection {
     private func ensureDirectoryVisibilityIndexes() throws {
         try execute("CREATE INDEX IF NOT EXISTS items_object_identity ON items(object_index_number, object_created_filetime)")
         try execute("CREATE INDEX IF NOT EXISTS scan_assigned_items ON scan_entries(scan_id) WHERE item_id IS NOT NULL")
+        // Additive telemetry does not change interpretation of schema-v9 state.
+        // An older installed app can safely ignore these independent tables.
+        try execute("CREATE TABLE IF NOT EXISTS transfer_receipts(day TEXT NOT NULL, item_id TEXT NOT NULL, version TEXT NOT NULL, upload INTEGER NOT NULL, PRIMARY KEY(day, item_id, version, upload))")
+        try execute("CREATE TABLE IF NOT EXISTS transfer_totals(day TEXT PRIMARY KEY, files INTEGER NOT NULL, uploaded INTEGER NOT NULL, downloaded INTEGER NOT NULL)")
     }
 }

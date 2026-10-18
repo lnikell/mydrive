@@ -14,6 +14,12 @@ import SwiftUI
     @State private var problem: Problem?
     @State private var autoFilledShare: String?
     @State private var signIn = SignIn.registered
+    @State private var keepDownloaded = false
+    @State private var cancelling = false
+    @State private var shares: [SMBShare] = []
+    @State private var listingShares = false
+    @State private var shareRequest: Task<Void, Never>?
+    @State private var shareRevision = UUID()
     @FocusState private var focus: Field?
 
     enum Field: Hashable { case address, share, username, password, name }
@@ -43,15 +49,16 @@ import SwiftUI
         .frame(width: 520)
         .background(Palette.window)
         .interactiveDismissDisabled(submitting)
-        .onAppear { DispatchQueue.main.async { focus = initialFocus } }
+        .onAppear { keepDownloaded = model.preferences.keepNewMounts; DispatchQueue.main.async { focus = initialFocus } }
         // Only the user's own edits clear a problem; a saved endpoint replacing
         // the typed address after a failed attempt must not.
         .onChange(of: settings.host) { _, value in if isAdding { addressChanged(value); clearProblem(.address) } }
         .onChange(of: settings.share) { _, _ in if isAdding { clearProblem(.share) } }
-        .onChange(of: settings.username) { _, _ in if isAdding { clearProblem(.username) } }
-        .onChange(of: password) { _, _ in clearProblem(.password) }
+        .onChange(of: settings.username) { _, _ in if isAdding { cancelShareLookup(); clearProblem(.username) } }
+        .onChange(of: password) { _, _ in cancelShareLookup(); clearProblem(.password) }
         .onDisappear {
             submission?.cancel()
+            shareRequest?.cancel()
             submission = nil
             password = ""
         }
@@ -101,8 +108,12 @@ import SwiftUI
                             .accessibilityLabel("Share")
                             .focused($focus, equals: .share)
                         MenuButton(entries: {
-                            [.header("Shares on this server"),
-                             .item("Listing shares isn't available yet", enabled: false, action: {})]
+                            [.header("Shares on this server")] + shares.map { share in
+                                .item(share.name, tooltip: share.comment, checked: settings.share == share.name,
+                                      action: { settings.share = share.name })
+                            } + [.separator, .item(listingShares ? "Finding shares…" : "Find shares…",
+                                enabled: !listingShares && !settings.host.isEmpty && !settings.username.isEmpty && !password.isEmpty,
+                                tooltip: "Enter your account and password, then find shares on this server.", action: listShares)]
                         }) { _ in Icon(.chevronDown, size: 12).foregroundStyle(Palette.secondary) }
                             .buttonStyle(.plain)
                             .help("Choose a share")
@@ -121,7 +132,7 @@ import SwiftUI
             if isAdding {
                 SegmentedPicker(selection: $signIn, segments: [
                     .init(value: .registered, title: "Registered user"),
-                    .init(value: .guest, title: "Guest", enabled: false, help: "Guest access isn't available yet.")
+                    .init(value: .guest, title: "Guest", enabled: false, help: "MyDrive requires signed SMB sessions. Guest access cannot provide a signing key; use a registered account.")
                 ])
             }
         } rows: {
@@ -162,14 +173,13 @@ import SwiftUI
             }
             FormRow(label: "Files", detail: "Online-only files download when you open them") {
                 MenuButton(entries: {
-                    [.item("Online-only", checked: true, action: {}),
-                     .item("Keep downloaded", enabled: false,
-                           tooltip: "Keeping a whole mount downloaded isn't available yet.", action: {})]
+                    [.item("Online-only", checked: !keepDownloaded, action: { keepDownloaded = false }),
+                     .item("Keep downloaded", checked: keepDownloaded, action: { keepDownloaded = true })]
                 }) { _ in
-                    Text("Online-only").modifier(PopupChrome())
+                    Text(keepDownloaded ? "Keep downloaded" : "Online-only").modifier(PopupChrome())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Files: Online-only")
+                .accessibilityLabel(keepDownloaded ? "Files: Keep downloaded" : "Files: Online-only")
             }
         }
     }
@@ -177,20 +187,23 @@ import SwiftUI
     private var footer: some View {
         VStack(spacing: 0) {
             if submitting {
-                ProgressBar(value: connectStep == 2 ? 0.8 : 0.35, height: 3)
+                ProgressBar(value: Double(max(1, connectStep)) / 3 * 0.9, height: 3)
                     .animation(.easeInOut(duration: 0.4), value: connectStep)
             }
             HStack(spacing: 8) {
                 if submitting {
                     ProgressView().controlSize(.small)
                     Text(stepMessage).font(Typography.callout).foregroundStyle(Palette.primary).lineLimit(1)
-                    Text("Step \(max(connectStep, 1)) of 2").font(Typography.callout).foregroundStyle(Palette.tertiary)
+                    Text("Step \(max(connectStep, 1)) of 3").font(Typography.callout).foregroundStyle(Palette.tertiary)
                 }
                 Spacer(minLength: 8)
-                Button("Cancel") { dismiss() }
+                Button(cancelling ? "Cancelling…" : "Cancel") {
+                    if submitting { cancelling = true; submission?.cancel() }
+                    else { dismiss() }
+                }
                     .buttonStyle(CardButtonStyle(height: 28, horizontalPadding: 14))
                     .keyboardShortcut(.cancelAction)
-                    .disabled(submitting)
+                    .disabled(cancelling)
                 Button(isAdding ? "Mount" : "Reconnect", action: submit)
                     .buttonStyle(AccentButtonStyle(horizontalPadding: 14))
                     .keyboardShortcut(.defaultAction)
@@ -247,7 +260,11 @@ import SwiftUI
     private var connectStep: Int { (drive ?? model.connecting)?.connectStep ?? 0 }
 
     private var stepMessage: String {
-        connectStep == 2 ? "Adding to Finder…" : "Checking \(serverName) and signing in…"
+        switch connectStep {
+        case 3: "Adding to Finder…"
+        case 2: "Signing in to \(serverName)…"
+        default: "Finding \(serverName)…"
+        }
     }
 
     private func message(for fields: Set<Field>) -> String? {
@@ -263,6 +280,7 @@ import SwiftUI
     /// follows later address edits until the user types their own.
     private func addressChanged(_ value: String) {
         guard isAdding, !submitting else { return }
+        cancelShareLookup()
         let embedded = try? SMBAddress(server: value, share: "").share
         let current = settings.share.trimmingCharacters(in: .whitespaces)
         if let embedded {
@@ -277,6 +295,34 @@ import SwiftUI
     }
 
     // MARK: Submit
+
+    private func listShares() {
+        guard !listingShares else { return }
+        var candidate = settings
+        do {
+            let address = try SMBAddress(server: candidate.host, share: candidate.share.isEmpty ? "IPC$" : candidate.share)
+            candidate.host = address.endpoint; candidate.share = address.share
+        } catch { problem = Self.problem(for: error, server: serverName, share: settings.share); return }
+        listingShares = true
+        let revision = UUID()
+        shareRevision = revision
+        let secret = password
+        shareRequest = Task {
+            defer { if shareRevision == revision { listingShares = false } }
+            do {
+                let found = try await SMBClient(settings: candidate).listShares(password: secret)
+                guard shareRevision == revision else { return }
+                shares = found
+                if shares.isEmpty { problem = Problem(field: .share, message: "This server returned no disk shares for this account. You can enter a share name directly.") }
+            } catch is CancellationError { }
+            catch { if shareRevision == revision { problem = Self.problem(for: error, server: serverName, share: settings.share) } }
+        }
+    }
+
+    private func cancelShareLookup() {
+        shareRevision = UUID(); shareRequest?.cancel(); shareRequest = nil
+        listingShares = false; shares = []
+    }
 
     private func submit() {
         guard canSubmit else { return }
@@ -301,9 +347,9 @@ import SwiftUI
         submission = Task {
             let success: Bool
             if let drive { success = await model.reconnect(drive, password: secret) }
-            else { success = await model.add(candidate, password: secret) }
+            else { success = await model.add(candidate, password: secret, keepDownloaded: keepDownloaded) }
             submitting = false
-            guard !Task.isCancelled else { return }
+            guard !Task.isCancelled else { password = ""; dismiss(); return }
             // Once the record is saved, later attempts must use the saved endpoint.
             if model.drives.contains(where: { $0.id == candidate.domainID }) { settings = candidate }
             if success {
@@ -339,6 +385,10 @@ import SwiftUI
                 return Problem(field: .share, message: "\(server) has no share named “\(share)”.")
             case .permissionDenied:
                 return Problem(field: .share, message: "This account can’t open “\(share)” on \(server).")
+            case .guestUnsupported:
+                return Problem(field: .username, message: error.localizedDescription)
+            case .serverPolicy:
+                return Problem(field: .address, message: error.localizedDescription)
             default:
                 return Problem(field: nil, message: error.localizedDescription)
             }

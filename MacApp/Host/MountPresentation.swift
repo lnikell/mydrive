@@ -9,6 +9,7 @@ enum MountHealth: Equatable {
     case retrying(String)
     case paused(String)
     case unregistered
+    case syncPaused
 
     var title: String {
         switch self {
@@ -17,6 +18,7 @@ enum MountHealth: Equatable {
         case .retrying: "Retrying"
         case .paused: "Can't connect"
         case .unregistered: "Needs reconnect"
+        case .syncPaused: "Paused"
         }
     }
 
@@ -28,6 +30,7 @@ enum MountHealth: Equatable {
         case .retrying: "Retrying"
         case .paused: "Paused"
         case .unregistered: "Not set up"
+        case .syncPaused: "Paused"
         }
     }
 
@@ -36,13 +39,14 @@ enum MountHealth: Equatable {
         case .working, .mounted: Palette.green
         case .retrying: Palette.orange
         case .paused, .unregistered: Palette.red
+        case .syncPaused: Palette.secondary
         }
     }
 
     var needsAttention: Bool {
         switch self {
         case .retrying, .paused, .unregistered: true
-        case .working, .mounted: false
+        case .working, .mounted, .syncPaused: false
         }
     }
 
@@ -50,7 +54,7 @@ enum MountHealth: Equatable {
     var needsReconnect: Bool {
         switch self {
         case .paused, .unregistered: true
-        case .working, .mounted, .retrying: false
+        case .working, .mounted, .retrying, .syncPaused: false
         }
     }
 }
@@ -71,7 +75,9 @@ extension DriveModel {
 
     var health: MountHealth {
         if busy { return .working(status.isEmpty ? "Working…" : status) }
+        if isPaused { return .syncPaused }
         if !isRegistered { return .unregistered }
+        if snapshot?.transfers.contains(where: \.active) == true { return .working("Syncing…") }
         switch monitorState {
         case let .retrying(_, message): return .retrying(message)
         case let .paused(message): return .paused(message)
@@ -110,8 +116,8 @@ enum RelativeTime {
 /// models already publish. Persistent history and per-file transfers are not
 /// available from the provider yet.
 @MainActor @Observable final class ActivityLog {
-    struct Entry: Identifiable, Equatable {
-        let id = UUID()
+    struct Entry: Identifiable, Equatable, Codable {
+        var id = UUID()
         let driveID: String?
         let driveName: String?
         var message: String
@@ -129,6 +135,18 @@ enum RelativeTime {
     private(set) var entries: [Entry] = []
     private var known: [String: Snapshot] = [:]
     private var appStatus = ""
+    private let historyURL = try? AppStorage.rootURL().appendingPathComponent("activity-history.json")
+
+    init() {
+        if let historyURL, let bytes = try? BoundedFile.read(historyURL, maximumBytes: 1_048_576),
+           let saved = try? JSONDecoder().decode([Entry].self, from: bytes) {
+            entries = Array(saved.suffix(200))
+            for index in entries.indices where entries[index].inProgress {
+                entries[index].inProgress = false
+                entries[index].message += " (interrupted)"
+            }
+        }
+    }
 
     var completed: [Entry] { entries.filter { !$0.inProgress }.reversed() }
 
@@ -167,7 +185,7 @@ enum RelativeTime {
         }
     }
 
-    func clearCompleted() { entries.removeAll { !$0.inProgress } }
+    func clearCompleted() { entries.removeAll { !$0.inProgress }; save() }
 
     private func record(driveID: String?, driveName: String?, message: String, inProgress: Bool) {
         // One operation's progress messages collapse into a single entry.
@@ -180,5 +198,11 @@ enum RelativeTime {
                                  date: Date(), inProgress: inProgress))
         }
         if entries.count > 200 { entries.removeFirst(entries.count - 200) }
+        save()
+    }
+
+    private func save() {
+        guard let historyURL, let data = try? JSONEncoder().encode(entries) else { return }
+        try? data.write(to: historyURL, options: .atomic)
     }
 }

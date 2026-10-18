@@ -1,4 +1,20 @@
-# MyDrive UI — features shown in the design but not implemented yet
+# MyDrive UI — functionality checklist
+
+## Implementation status — 19 October 2026
+
+The SMB functionality below is now connected in source while retaining the new UI's layout and visual components:
+
+- Provider-owned Online-only and Kept Offline libraries, counts, cache measurements, pin-preserving Clear Cache and automatic cache maintenance.
+- Per-file transfer progress, speeds, pause/resume, persistent recent history, retry, conflict acknowledgement and durable daily totals. Folder imports report individual files and obey the configured worker count.
+- SMB share enumeration, whole-mount Keep Downloaded, three connection steps, cancellation rollback, new-mount selection and per-mount Info settings.
+- Login, Dock/menu bar/Finder preferences, network/wake reconnect, notifications, exclusions, bandwidth limits/schedules and transfer/retry settings.
+- Credential-free profile import/export, SMB Mountain Duck bookmark import, Keychain Access, logs, Finder registration repair and SMB discovery entry points. Tailnet discovery requires an installed and signed-in Tailscale CLI; unavailable and error states are shown explicitly.
+
+SFTP, WebDAV, S3 and the default SSH key remain disabled as coming-soon features. SMB Guest remains disabled because the transport requires signed, named-account sessions. Keep both copies remains the only supported conflict strategy.
+
+Automated checks and isolated UI checks cover these implementations. End-to-end qualification of the current signed build is still in progress. Notarized distribution and the installed Sparkle update also remain separate release gates. The original gap inventory is retained below for reference.
+
+## Original UI inventory
 
 The host app UI was rebuilt from the Figma file **Flux-Academy-Workshop → Page 4 → "03 — Pro Table — Dark"** and its continuation frames (`03.1`–`03.7`):
 https://www.figma.com/design/m8wmZtg76Rr1VNfsuIF885/Flux-Academy-Workshop?node-id=103-860

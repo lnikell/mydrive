@@ -1,6 +1,8 @@
 import Foundation
 import MyDriveCore
 
+func fixtureDate() -> Date { Date() }
+
 final class Fixture {
     let directory: URL
     let url: URL

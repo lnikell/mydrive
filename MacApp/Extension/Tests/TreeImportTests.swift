@@ -11,7 +11,9 @@ enum TreeImportTests {
         try await allocatedOwnerRestart()
         try await staleChildMaintenance()
         try await preflightRecovery()
-        return 7
+        try await excludedDescendantPreservesCompleteIntake()
+        try await changedExclusionsStopPendingImport()
+        return 9
     }
 
     struct Fixture {
@@ -22,7 +24,9 @@ enum TreeImportTests {
         let input: MutationInput
     }
 
-    static func fixture(wide: Bool = false, probe: TreeFrontierProbe? = nil) async throws -> Fixture {
+    static func fixture(wide: Bool = false, probe: TreeFrontierProbe? = nil,
+                        preferences: @escaping @Sendable () async throws -> UserPreferences = { UserPreferences() },
+                        activity: @escaping @Sendable (TreeTransferEvent) async -> Void = { _ in }) async throws -> Fixture {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let source = root.appendingPathComponent("Local.rtfd")
         try FileManager.default.createDirectory(at: source.appendingPathComponent("Nested/Empty"), withIntermediateDirectories: true)
@@ -33,12 +37,14 @@ enum TreeImportTests {
                 try Data("small file \(index)".utf8).write(to: source.appendingPathComponent(String(format: "Small-%03d.txt", index)))
             }
         }
-        let peer = MutationPeer(), owner = try owner(root, peer: peer, probe: probe)
+        let peer = MutationPeer(), owner = try owner(root, peer: peer, probe: probe, preferences: preferences, activity: activity)
         let input = try request(contents: source)
         return Fixture(root: root, source: source, peer: peer, owner: owner, input: input)
     }
 
-    static func owner(_ root: URL, peer: MutationPeer, probe: TreeFrontierProbe? = nil) throws -> ProviderMutations {
+    static func owner(_ root: URL, peer: MutationPeer, probe: TreeFrontierProbe? = nil,
+                      preferences: @escaping @Sendable () async throws -> UserPreferences = { UserPreferences() },
+                      activity: @escaping @Sendable (TreeTransferEvent) async -> Void = { _ in }) throws -> ProviderMutations {
         ProviderMutations(catalog: try Catalog(databaseURL: root.appendingPathComponent("catalog.sqlite")),
             staging: try MutationStaging(root: root.appendingPathComponent("Mutations")),
             remote: MutationRemote(stat: { try await peer.networkStat($0) }, mutate: { request, reconcile, progress in
@@ -58,7 +64,7 @@ enum TreeImportTests {
                     let entry = try await peer.treeRead(path, destination, scope)
                     progress(entry.size); return entry
                 }),
-            checkActive: { try Task.checkCancellation() })
+            checkActive: { try Task.checkCancellation() }, preferences: preferences, transferActivity: activity)
     }
 
     static func request(contents: URL?) throws -> MutationInput {
@@ -66,8 +72,54 @@ enum TreeImportTests {
             fields: [.filename, .parentItemIdentifier, .contents], contents: contents, allowDirectoryContents: true)
     }
 
+    private static func excluding(_ patterns: [String], from owner: ProviderMutations) -> ProviderMutations {
+        ProviderMutations(catalog: owner.catalog, staging: owner.staging, remote: owner.remote,
+            checkActive: owner.checkActive, packageRegistryAvailable: owner.packageRegistryAvailable,
+            preferences: { var policy = UserPreferences(); policy.excludedPatterns = patterns; return policy })
+    }
+
+    private static func excludedDescendantPreservesCompleteIntake() async throws {
+        let fixture = try await fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        let blocked = excluding(["Imported folder/Nested/*"], from: fixture.owner)
+        do {
+            _ = try await blocked.write(fixture.input, create: true, progress: Progress(totalUnitCount: 1))
+            throw MutationTestFailure(message: "Folder import uploaded an excluded descendant")
+        } catch let error as NSFileProviderError where error.code == .excludedFromSync {}
+        try mutationCheck(await fixture.peer.counts().2 == 0 && fixture.owner.staging.planKeys(limit: 10).count == 1,
+            "Excluded folder mutated the server or lost its durable intake")
+        try FileManager.default.removeItem(at: fixture.source)
+        _ = try await fixture.owner.write(try request(contents: nil), create: true, progress: Progress(totalUnitCount: 1))
+        try mutationCheck(await fixture.peer.hash("Imported folder/Nested/Bytes.bin") == MutationPeer.hash(Data([0,1,2,255])),
+            "Removing exclusions could not replay the complete retained local folder")
+        print("PASS excluded nested paths block all folder mutations and retain a complete retryable intake after source loss")
+    }
+
+    private static func changedExclusionsStopPendingImport() async throws {
+        let fixture = try await fixture()
+        defer { try? FileManager.default.removeItem(at: fixture.root) }
+        await fixture.peer.setTreeReadCorrupt(true)
+        do { _ = try await fixture.owner.write(fixture.input, create: true, progress: Progress(totalUnitCount: 1)) }
+        catch {}
+        let before = await fixture.peer.counts().2
+        try mutationCheck(before > 0, "Pending import fixture performed no private work")
+        let blocked = excluding(["*.bin"], from: fixture.owner)
+        do {
+            _ = try await blocked.write(try request(contents: nil), create: true, progress: Progress(totalUnitCount: 1))
+            throw MutationTestFailure(message: "Changed exclusions did not fence a pending import")
+        } catch let error as NSFileProviderError where error.code == .excludedFromSync {}
+        let after = await fixture.peer.counts().2
+        let published = try await fixture.owner.catalog.children().items
+        try mutationCheck(after == before && published.isEmpty,
+            "A policy-blocked retry mutated or published the private import")
+        await fixture.peer.setTreeReadCorrupt(false)
+        _ = try await fixture.owner.write(try request(contents: nil), create: true, progress: Progress(totalUnitCount: 1))
+        print("PASS new exclusion rules stop pending private imports; removing them resumes the same durable work")
+    }
+
     private static func publishedGraph() async throws {
-        let fixture = try await fixture(wide: true)
+        let activity = TreeActivityProbe()
+        let fixture = try await fixture(wide: true, activity: { await activity.record($0) })
         defer { try? FileManager.default.removeItem(at: fixture.root) }
         let progress = Progress(totalUnitCount: 1)
         let root = try await fixture.owner.write(fixture.input, create: true, progress: progress)
@@ -85,12 +137,23 @@ enum TreeImportTests {
         let staged = try FileManager.default.contentsOfDirectory(atPath: fixture.owner.staging.root.path)
         try mutationCheck(staged.isEmpty, "Verified tree publication did not retire clean local input/plans/arena")
         let count = await fixture.peer.counts().2
+        try await fixture.owner.catalog.recordPublishedTreeTransfers(rootID: root.id)
+        try await fixture.owner.catalog.recordPublishedTreeTransfers(rootID: root.id)
+        let totals = try await fixture.owner.catalog.transferTotals()
+        let activityState = await activity.snapshot()
+        let publishedTree = try await fixture.owner.catalog.treeImportStatus(rootID: root.id)!
+        try mutationCheck(totals.files == 102 && totals.uploaded == publishedTree.tree.totalBytes &&
+            activityState.started == 102 && activityState.finished == 102 && activityState.failures == 0 &&
+            activityState.paths.contains("Imported folder/Nested/Bytes.bin") &&
+            activityState.paths.allSatisfy({ !$0.contains(".mydrive-") }),
+            "Folder transfer history/totals missed logical files, counted replay twice or exposed scratch names")
         let replay = try await fixture.owner.write(try request(contents: nil), create: true, progress: Progress(totalUnitCount: 1))
         let freshReplay = try await fixture.owner.write(fixture.input, create: true, progress: Progress(totalUnitCount: 1))
         let replayCalls = await fixture.peer.counts().2
         try mutationCheck(replay.id == root.id && freshReplay.id == root.id && replayCalls == count,
                           "Completed nil-contents callback replay reran a whole import")
         print("PASS NEW tree atomically publishes 100 small files, nested/empty directories and exact bytes; clean replay performs no RPC")
+        print("PASS every imported file reports real progress under its logical name; published daily totals deduplicate callback replay")
     }
 
     private static func readbackRestart() async throws {

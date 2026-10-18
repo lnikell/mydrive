@@ -19,6 +19,11 @@ struct ConnectionSettings: Codable, Equatable, Identifiable, Sendable {
 }
 
 enum AppStorage {
+    static var hasSharedConfiguration: Bool {
+        Bundle.main.object(forInfoDictionaryKey: "MyDriveAppGroupID") != nil ||
+            Bundle.main.object(forInfoDictionaryKey: "MyDriveDevelopmentStoragePath") != nil
+    }
+
     static var groupID: String {
         Bundle.main.object(forInfoDictionaryKey: "MyDriveAppGroupID") as? String ?? "group.local.mydrive"
     }

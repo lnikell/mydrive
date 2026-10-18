@@ -27,7 +27,7 @@ import Foundation
 
     deinit { task?.cancel() }
 
-    func start(refresh: @escaping Refresh, onState: @escaping StateSink) async {
+    func start(interval: Int = 30, refresh: @escaping Refresh, onState: @escaping StateSink) async {
         revision &+= 1
         let requestedRevision = revision
         let previous = task
@@ -37,7 +37,7 @@ import Foundation
         await previous?.value
         guard revision == requestedRevision, !Task.isCancelled else { return }
         let wait = self.wait
-        task = Task { await Self.run(refresh: refresh, onState: onState, wait: wait) }
+        task = Task { await Self.run(baseInterval: max(1, interval), refresh: refresh, onState: onState, wait: wait) }
     }
 
     /// Ends local waiting before removal. It cannot undo provider work that an
@@ -51,10 +51,10 @@ import Foundation
         if revision == requestedRevision { task = nil }
     }
 
-    private static func run(refresh: Refresh, onState: StateSink, wait: Wait) async {
+    private static func run(baseInterval: Int, refresh: Refresh, onState: StateSink, wait: Wait) async {
         guard !Task.isCancelled else { return }
-        var interval = 30
-        var retryInterval = 30
+        var interval = baseInterval
+        var retryInterval = baseInterval
         onState(.waiting)
         while !Task.isCancelled {
             do {
@@ -70,8 +70,8 @@ import Foundation
             do {
                 try await refresh()
                 try Task.checkCancellation()
-                interval = 30
-                retryInterval = 30
+                interval = baseInterval
+                retryInterval = baseInterval
                 onState(.refreshed)
             } catch is CancellationError { return }
             catch {

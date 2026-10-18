@@ -47,6 +47,7 @@ struct Args {
     mutation: Option<nas_transport::mutation::MutationRequest>,
     delete_scope: Option<nas_transport::mutation::DeleteScope>,
     tree_scope: Option<nas_transport::mutation::TreeScope>,
+    limits: nas_transport::transfer_limits::TransferLimits,
 }
 
 impl Args {
@@ -67,6 +68,7 @@ impl Args {
             mutation: None,
             delete_scope: None,
             tree_scope: None,
+            limits: Default::default(),
         };
         let mut stdin = false;
         while let Some(arg) = input.next() {
@@ -188,12 +190,19 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
         mutation_root: args.root,
         require_encryption: args.encrypted,
     };
-    if args.command == "shares" {
+    if args.command == "shares" || args.command == "shares_native" {
         let (security, shares) = tokio::select! {
             biased;
             _ = cancelled.cancelled() => return Err(Error::Cancelled),
             result = nas_transport::discover_shares(config) => result?,
         };
+        if args.command == "shares_native" {
+            if shares.len() > 1000 {
+                return Err(Error::Input("too many shares"));
+            }
+            emit(json!({"type":"connected","security":security}))?;
+            return emit(json!({"type":"complete","result":{"shares":shares}}));
+        }
         return emit(
             json!({"type":"shares","security":security,"shares":shares,"milliseconds":started.elapsed().as_millis()}),
         );
@@ -369,7 +378,10 @@ async fn main() {
         Args::parse(raw.into_iter()).and_then(|args| password().map(|password| (args, password)))
     };
     let result = match parsed {
-        Ok((args, password)) => run(args, password).await,
+        Ok((args, password)) => {
+            let limits = args.limits.clone();
+            limits.scope(run(args, password)).await
+        }
         Err(error) => Err(error),
     };
     if let Err(error) = result {

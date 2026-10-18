@@ -5,7 +5,8 @@ enum TreeWorkProgressTests {
     static func run() throws -> Int {
         try aggregateBytesAndReceipts()
         try concurrentAndStaleCallbacks()
-        return 2
+        try configuredMaximum()
+        return 3
     }
 
     private static func configure(_ progress: Progress) throws -> TreeProgressAggregate {
@@ -35,8 +36,6 @@ enum TreeWorkProgressTests {
     private static func concurrentAndStaleCallbacks() throws {
         let progress = Progress(totalUnitCount: 1), aggregate = try configure(progress)
         let workers = try (0..<4).map { _ in try aggregate.begin(expectedBytes: 1_000) }
-        do { _ = try aggregate.begin(expectedBytes: 1); throw MutationTestFailure(message: "Progress retained a fifth active token") }
-        catch is MutationTestFailure { throw MutationTestFailure(message: "Progress retained a fifth active token") } catch {}
         DispatchQueue.concurrentPerform(iterations: 4_000) { index in
             workers[index % 4].received(Int64(index / 4 + 1))
         }
@@ -52,5 +51,18 @@ enum TreeWorkProgressTests {
         try mutationCheck(progress.completedUnitCount >= highWater && !progress.isFinished,
                           "Released token capacity was not reusable without a retained per-node progress graph")
         print("PASS four concurrent counters aggregate exactly; stale callbacks, failed siblings and reverse receipts cannot regress progress")
+    }
+
+    private static func configuredMaximum() throws {
+        let progress = Progress(totalUnitCount: 1)
+        let aggregate = try TreeWorkProgress.configure(progress,
+            tree: .init(id: UUID(), nodeCount: 8, totalBytes: 800, sha256: String(repeating: "a", count: 64)))
+        let workers = try (0..<8).map { _ in try aggregate.begin(expectedBytes: 100) }
+        do { _ = try aggregate.begin(expectedBytes: 1); throw MutationTestFailure(message: "Progress exceeded the supported transfer setting") }
+        catch is MutationTestFailure { throw MutationTestFailure(message: "Progress exceeded the supported transfer setting") } catch {}
+        for worker in workers { worker.received(100); worker.finish() }
+        try mutationCheck(progress.completedUnitCount == 8_000_000 && !progress.isFinished,
+                          "Eight configured workers failed or completed the unpublished root")
+        print("PASS the eight-transfer setting has eight bounded progress slots and still reserves root publication")
     }
 }
