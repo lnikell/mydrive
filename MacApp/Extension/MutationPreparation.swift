@@ -164,7 +164,7 @@ struct MutationPreparation: Sendable {
 
     func collision(parentID: String, name: String) async throws -> NSError {
         if let item = try await catalog.child(named: name, in: parentID) {
-            let value = ProviderItem(item, policy: try await catalog.offlinePolicy(for: item.id), displayName: name)
+            let value = try await ProviderItemProjection.item(item, catalog: catalog, displayName: name)
             return NSError.fileProviderErrorForCollision(with: value)
         }
         return NSError(domain: NSFileProviderErrorDomain, code: NSFileProviderError.filenameCollision.rawValue)

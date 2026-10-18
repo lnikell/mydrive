@@ -380,8 +380,8 @@ struct ProviderMutations: Sendable {
 
     func deletionRejected(id: String, parentID: String, entry: RemoteEntry, message: String? = nil) async throws -> NSError {
         let item = CatalogItem(id: id, parentID: parentID, entry: entry)
-        let rejection = NSError.fileProviderErrorForRejectedDeletion(of: ProviderItem(
-            item, policy: try await catalog.offlinePolicy(for: id), displayName: entry.name))
+        let projected = try await ProviderItemProjection.item(item, catalog: catalog, displayName: entry.name)
+        let rejection = NSError.fileProviderErrorForRejectedDeletion(of: projected)
         guard let message else { return rejection }
         var info = rejection.userInfo
         info[NSLocalizedDescriptionKey] = message

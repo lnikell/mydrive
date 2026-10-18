@@ -57,6 +57,16 @@ private final class FakeEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
 private struct AdapterTests {
     @MainActor
     static func main() async throws {
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--package-capabilities-only" {
+            let count = try await PackageCapabilitiesTests.run()
+            print("PASS \(count) package capability groups; no NAS or registered Domain")
+            return
+        }
+        if CommandLine.arguments.count == 2, CommandLine.arguments[1] == "--package-capabilities-without-registry" {
+            let count = try await PackageCapabilitiesTests.run(requiresRegistry: false)
+            print("PASS \(count) registry-independent package capability groups")
+            return
+        }
         if CommandLine.arguments == [CommandLine.arguments[0], "--package-metadata-only"] {
             var count = try await MutationMetadataOnlyTests.run()
             #if MYDRIVE_DEVELOPMENT
@@ -105,8 +115,8 @@ private struct AdapterTests {
               let root = try await catalog.item(id: Catalog.rootID) else {
             throw TestFailure(message: "Fixture missing")
         }
-        let item = ProviderItem(model, policy: .onDemand, displayName: "Test NAS")
-        let rootItem = ProviderItem(root, policy: .keepAvailable, displayName: "Test NAS")
+        let item = ProviderItem(model, policy: .onDemand, displayName: "Test NAS", access: .readWrite)
+        let rootItem = ProviderItem(root, policy: .keepAvailable, displayName: "Test NAS", access: .readWrite)
         try require(item.itemIdentifier.rawValue == model.id, "Stable catalog identity changed")
         try require(item.capabilities.contains(.allowsWriting), "Regular NAS files do not advertise implemented writes")
         try require(item.fileSystemFlags.contains(.userWritable), "Regular NAS files do not have writable local permissions")
@@ -125,7 +135,7 @@ private struct AdapterTests {
             throw TestFailure(message: "Package fixtures missing")
         }
         for directory in [package, folder] {
-            let native: any NSFileProviderItem = ProviderItem(directory, policy: .onDemand, displayName: "Test NAS")
+            let native: any NSFileProviderItem = ProviderItem(directory, policy: .onDemand, displayName: "Test NAS", access: .readWrite)
             try require(native.contentType == .folder,
                         "NAS directory must expose the File Provider folder contract: \(directory.entry.name)")
         }
@@ -262,6 +272,7 @@ private struct AdapterTests {
         checkCount += try await MutationRecoveryTests.run()
         checkCount += try await MutationRepresentationTests.run()
         checkCount += try await MutationMetadataOnlyTests.run()
+        checkCount += try await PackageCapabilitiesTests.run()
         checkCount += try await LocalTreeSnapshotTests.run()
         checkCount += try await TreeImportTests.run()
         checkCount += try await TreeLayoutTests.run()

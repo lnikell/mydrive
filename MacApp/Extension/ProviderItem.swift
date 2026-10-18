@@ -8,11 +8,13 @@ final class ProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
     let model: CatalogItem
     private let policy: OfflinePolicy
     private let displayName: String
+    private let access: ProviderItemAccess
 
-    init(_ model: CatalogItem, policy: OfflinePolicy, displayName: String) {
+    init(_ model: CatalogItem, policy: OfflinePolicy, displayName: String, access: ProviderItemAccess) {
         self.model = model
         self.policy = policy
         self.displayName = displayName
+        self.access = access
     }
 
     static func catalogID(_ identifier: NSFileProviderItemIdentifier) -> String {
@@ -41,6 +43,9 @@ final class ProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
     }
 
     var capabilities: NSFileProviderItemCapabilities {
+        guard access == .readWrite else {
+            return model.entry.kind == .directory ? [.allowsReading, .allowsContentEnumerating] : [.allowsReading]
+        }
         switch model.entry.kind {
         case .directory:
             var value: NSFileProviderItemCapabilities = [.allowsReading, .allowsContentEnumerating, .allowsAddingSubItems]
@@ -52,7 +57,10 @@ final class ProviderItem: NSObject, NSFileProviderItem, @unchecked Sendable {
     }
 
     var fileSystemFlags: NSFileProviderFileSystemFlags {
-        switch model.entry.kind {
+        if access == .readOnly {
+            return model.entry.kind == .directory ? [.userReadable, .userExecutable] : [.userReadable]
+        }
+        return switch model.entry.kind {
         case .directory: [.userReadable, .userWritable, .userExecutable]
         case .file: [.userReadable, .userWritable]
         case .symbolicLink: [.userReadable]

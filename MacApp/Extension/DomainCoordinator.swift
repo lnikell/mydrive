@@ -188,12 +188,9 @@ actor DomainCoordinator {
     }
 
     func providerItems(_ models: [CatalogItem]) async throws -> [ProviderItem] {
-        var result: [ProviderItem] = []
-        result.reserveCapacity(models.count)
-        for model in models {
-            try checkActive()
-            result.append(try await providerItem(model))
-        }
+        try checkActive()
+        let result = try await ProviderItemProjection.items(models, catalog: catalog, displayName: settings.displayName)
+        try checkActive()
         return result
     }
 
@@ -288,7 +285,7 @@ actor DomainCoordinator {
         // committed upload into a second remote write on the next callback.
         await recordMutationPublication()
         startRefresh(parentID: result.parentID ?? Catalog.rootID)
-        return try await providerItem(result)
+        return try await ProviderItemProjection.committedItem(result, catalog: catalog, displayName: settings.displayName)
     }
 
     func delete(id: String, contentVersion: Data, metadataVersion: Data,
@@ -483,8 +480,7 @@ actor DomainCoordinator {
     }
 
     private func providerItem(_ model: CatalogItem) async throws -> ProviderItem {
-        let policy = try await catalog.offlinePolicy(for: model.id)
-        return ProviderItem(model, policy: policy, displayName: settings.displayName)
+        try await ProviderItemProjection.item(model, catalog: catalog, displayName: settings.displayName)
     }
 
     private func evictFile(id: String) async throws {
