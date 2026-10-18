@@ -145,7 +145,8 @@ fn success(frame: &Frame, command: Command) -> Result<()> {
     }
     Ok(())
 }
-fn query_buffer(body: &[u8], maximum: u32) -> Result<Vec<u8>> {
+// QUERY_INFO and QUERY_DIRECTORY share this header-relative buffer envelope.
+pub(crate) fn query_buffer(body: &[u8], maximum: u32) -> Result<Vec<u8>> {
     if body.len() < 8 || u16::from_le_bytes([body[0], body[1]]) != 9 {
         return Err(invalid());
     }

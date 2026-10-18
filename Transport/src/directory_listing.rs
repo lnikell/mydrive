@@ -7,12 +7,8 @@ use smb2::{
     client::connection::Connection,
     msg::{
         directory_info,
-        query_directory::{
-            FileInformationClass, QueryDirectoryFlags, QueryDirectoryRequest,
-            QueryDirectoryResponse,
-        },
+        query_directory::{FileInformationClass, QueryDirectoryFlags, QueryDirectoryRequest},
     },
-    pack::{ReadCursor, Unpack},
     types::{status::NtStatus, Command},
     Tree,
 };
@@ -128,8 +124,8 @@ async fn read_reserved_observed(
             if frame.body.len() > BUFFER_BYTES as usize + 8 {
                 return Err(Error::Smb(smb2::ErrorKind::InvalidData));
             }
-            let response = QueryDirectoryResponse::unpack(&mut ReadCursor::new(&frame.body))?;
-            let entries = enrich(&handle, path, parse(class, &response.output_buffer)?).await?;
+            let buffer = crate::held_metadata::query_buffer(&frame.body, BUFFER_BYTES)?;
+            let entries = enrich(&handle, path, parse(class, &buffer)?).await?;
             count = count.checked_add(entries.len()).ok_or(Error::Smb(smb2::ErrorKind::TooLarge))?;
             observation(ListingObservation::Page(entries))?;
             pages += 1;

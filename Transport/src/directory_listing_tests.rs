@@ -6,9 +6,10 @@ use smb2::{
         create::{CreateAction, CreateRequest, CreateResponse},
         directory_info::DirectoryInfoEntry,
         header::Header,
+        query_directory::QueryDirectoryResponse,
         query_info::{QueryInfoRequest, QueryInfoResponse},
     },
-    pack::{FileTime, Pack, WriteCursor},
+    pack::{FileTime, Pack, ReadCursor, Unpack, WriteCursor},
     transport::MockTransport,
     types::{flags::HeaderFlags, FileId, OplockLevel, TreeId},
 };
@@ -390,3 +391,6 @@ async fn rejected_start_closes_handle_without_querying_or_exposing_children() {
     assert_eq!(mock.sent_messages().len(), 5);
     mock.close();
 }
+
+#[path = "query_envelope_tests.rs"]
+mod query_envelope;

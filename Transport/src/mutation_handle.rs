@@ -136,7 +136,7 @@ impl Handle {
                 },
             )
             .await?;
-        Ok(QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))?.output_buffer)
+        crate::held_metadata::query_buffer(&frame.body, length)
     }
     pub(super) async fn security(&self) -> Result<crate::mutation_security::AccessSecurity> {
         let frame = self
@@ -153,9 +153,10 @@ impl Handle {
                 },
             )
             .await?;
-        crate::mutation_security::AccessSecurity::parse(
-            QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))?.output_buffer,
-        )
+        crate::mutation_security::AccessSecurity::parse(crate::held_metadata::query_buffer(
+            &frame.body,
+            64 * 1024,
+        )?)
     }
 
     pub(super) async fn rename(

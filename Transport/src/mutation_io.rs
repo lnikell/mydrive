@@ -14,7 +14,7 @@ use smb2::{
             CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel, ShareAccess,
         },
         flush::FlushRequest,
-        query_info::{InfoType, QueryInfoRequest, QueryInfoResponse},
+        query_info::{InfoType, QueryInfoRequest},
         read::{ReadRequest, ReadResponse},
         set_info::SetInfoRequest,
         write::{WriteRequest, WriteResponse},
@@ -23,6 +23,9 @@ use smb2::{
     types::{flags::FileAccessMask, status::NtStatus, Command, FileId, OplockLevel, TreeId},
     Frame, Tree,
 };
+
+#[cfg(test)]
+use smb2::msg::query_info::QueryInfoResponse;
 
 const REPARSE: u32 = 0x400;
 const DIRECTORY: u32 = 0x10;
