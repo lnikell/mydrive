@@ -289,6 +289,15 @@ async fn run(args: Args, password: Zeroizing<String>) -> Result<(), Error> {
             };
             download.map(|download| json!({"bytes":download.bytes,"entry":download.entry}))
         }
+        "hydrate" => nas
+            .hydrate(
+                &args.paths[0],
+                Path::new(&args.paths[1]),
+                &cancelled,
+                progress,
+            )
+            .await
+            .map(|download| json!({"bytes":download.bytes,"entry":download.entry})),
         "prepare" => nas.prepare_experiment().await.map(|_| json!({})),
         "cleanup" => nas.cleanup_experiment().await.map(|_| json!({})),
         "write" => nas

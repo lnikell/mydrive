@@ -40,7 +40,8 @@ the share root.
 | `probe` | None | Authenticated share connection and negotiated security. |
 | `list` | `path`; optional `delete_scope` or `tree_scope` | Bounded pages, then exhaustive completion with the actual held directory's `entry`. |
 | `stat` | `path`; optional `delete_scope` or `tree_scope` | `entry`, or explicit `null` for a missing path. Permission/metadata failures are errors. |
-| `read` | `path`, new local `destination`; optional `tree_scope` | Full guarded hydration, confirmed `bytes` and same-handle `entry`. An owned partial local output is removed on failure. |
+| `read` | `path`, new local `destination`; optional `tree_scope` | Strict default-data verification, confirmed `bytes` and same-handle `entry`. Cleans a still-owned partial output on failure. |
+| `hydrate` | `path`, new local `destination` | Full ordinary-file download with the explicit metadata policy below, confirmed `bytes` and same-handle `entry`. No range or scope fields. |
 | `mutate` | Typed `request` | One durable mutation phase and its receipts. |
 | `reconcile` | The same frozen `request` | Read-only inspection of an interrupted phase; no blind mutation replay. |
 
@@ -59,6 +60,33 @@ unsigned 64-bit integers, not floating point. Listings are observations, not an
 atomic NAS snapshot. Index numbers are qualified with creation time and kind,
 not used as global provider IDs. Root stat returns a real SMB observation,
 not the Catalog's synthetic root.
+
+## Guarded downloads
+
+`read` and `hydrate` share one bounded streaming reader. Both obtain complete
+same-handle metadata before and after bytes, check leaf and ancestor closes,
+and recheck output identity, length and cancellation before success. They
+require read-EA and metadata-query access as well as read-data access; a server
+that cannot supply these observations is refused. Local output is exclusively
+created with requested mode0600; replaced or preexisting paths are preserved.
+
+Strict `read` rejects every named stream and remains the verification route for
+mutations and tree transfers. `hydrate` is selected only by native content
+fetches. With only the default data stream, both purposes retain the historical
+body-data eligibility, including hidden/read-only files. This does not import
+EAs, POSIX modes or hardlink relationships.
+
+The sole additional hydration case is exactly `:com.apple.provenance:$DATA`
+with logical and allocation length11, alongside the full default stream. It
+requires one link, zero EA aggregate bytes, DOS attributes0/ARCHIVE/NORMAL
+(with NORMAL alone), and macOS's public fixed-name SYNC policy explicitly
+permitting omission. The
+value is never read, trusted or applied. Other names, sizes, forks and metadata
+remain unsupported; this is a synchronization exclusion, not COPY/BACKUP
+metadata fidelity. Other platforms refuse this provenance case. The stdin
+protocol exposes no policy, stream-name or allowlist override. This download
+exception does not relax mutation checks: file writes, renames and deletions
+still refuse named streams and preserve pending local work.
 
 ## Durable mutation contract
 
@@ -200,9 +228,10 @@ save semantics are outside this transport contract.
   `HostUnreachable` receive a cancellable five-second retry-eligibility window.
   This does not identify an OS cause or cap an in-flight connect; authentication
   and file mutations are never automatically replayed.
-- Hydration refuses named streams/resource forks and reparse points. It reads
-  logical bytes without reproducing NAS EAs, ACLs, hardlink relations or sparse
-  layout. File mutations require one link, zero EAs and only the unnamed stream.
+- Downloads refuse reparse points and unsupported streams/resource forks under
+  the purpose-specific policy above. They read logical bytes without reproducing
+  NAS EAs, ACLs, hardlink relations or sparse layout. File mutations require one
+  link, zero EAs and only the unnamed stream.
   Nonempty local resource forks are refused. Sparse/compressed/encrypted
   replacement attributes are unsupported.
 - Replacement preserves remote owner/group/DACL through security-descriptor

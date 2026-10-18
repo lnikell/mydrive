@@ -4,6 +4,10 @@ import Foundation
 
 enum DevelopmentPayloadShapeTests {
     static func run() throws -> Int {
+        let absent = DevelopmentPayloadShape.inspect(nil, contentType: String(repeating: "x", count: 256))
+        guard absent.kind == "none", absent.size == -1, absent.errorCode == 0, absent.contentType.count == 128 else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }

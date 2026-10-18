@@ -4,16 +4,16 @@
 //! bounded raw reads and same-handle observations together here; the crate still
 //! owns framing, credits, signing, encryption and response validation.
 
-use crate::{CancellationToken, Entry, Error, Result};
+use crate::{CancellationToken, Error, Result};
 use smb2::{
     client::connection::Connection,
     msg::{
-        close::CloseRequest,
+        close::{CloseRequest, CloseResponse},
         create::{
-            CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel, ShareAccess,
+            CreateAction, CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel,
+            ShareAccess,
         },
-        query_info::{InfoType, QueryInfoRequest, QueryInfoResponse},
-        read::{ReadRequest, ReadResponse, SMB2_CHANNEL_NONE},
+        read::{ReadRequest, SMB2_CHANNEL_NONE},
     },
     pack::{Pack, ReadCursor, Unpack},
     types::{flags::FileAccessMask, status::NtStatus, Command, FileId, OplockLevel, TreeId},
@@ -24,31 +24,6 @@ use smb2::{
 // Eight range futures can run concurrently; each range is at most CHUNK_BYTES.
 const WIRE_READ_BYTES: u32 = 64 * 1024;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Observation {
-    pub size: u64,
-    created: u64,
-    modified: u64,
-    changed: u64,
-    attributes: u32,
-    index: u64,
-}
-
-impl Observation {
-    pub fn entry(&self, path: &str) -> Entry {
-        Entry {
-            name: path.rsplit('/').next().unwrap_or(path).to_owned(),
-            bytes: self.size,
-            directory: false,
-            index_number: Some(self.index),
-            created_filetime: self.created,
-            modified_filetime: self.modified,
-            changed_filetime: self.changed,
-            attributes: self.attributes,
-        }
-    }
-}
-
 pub(crate) struct GuardedRead {
     connection: Connection,
     tree: TreeId,
@@ -57,6 +32,7 @@ pub(crate) struct GuardedRead {
     closed: bool,
     cancel: CancellationToken,
     ancestors: Option<crate::mutation_io::MutationIO>,
+    path: String,
 }
 
 impl GuardedRead {
@@ -66,6 +42,9 @@ impl GuardedRead {
         path: &str,
         cancel: &CancellationToken,
     ) -> Result<Self> {
+        // A dropped first CREATE has no recoverable file ID. Own its connection
+        // before any ancestor/leaf await; disarm only after the reader owns it.
+        let mut lifetime = OpenLifetime(Some(connection.clone()));
         // DFS is disabled on this experiment's client. Do not silently use a
         // raw relative path on a DFS tree or introduce an unpinned reconnect.
         if tree.is_dfs {
@@ -74,7 +53,7 @@ impl GuardedRead {
         let ancestors =
             crate::mutation_io::MutationIO::for_read(connection.clone(), tree, path, cancel)
                 .await?;
-        let request = read_request(path);
+        let request = read_request(path, read_access());
         let frame = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
@@ -95,7 +74,7 @@ impl GuardedRead {
             .params()
             .map_or(WIRE_READ_BYTES, |params| params.max_read_size)
             .min(WIRE_READ_BYTES);
-        Ok(Self {
+        let reader = Self {
             connection,
             tree: tree.tree_id,
             file: opened.file_id,
@@ -103,32 +82,22 @@ impl GuardedRead {
             closed: false,
             cancel: cancel.clone(),
             ancestors: Some(ancestors),
-        })
-    }
-
-    pub async fn observe(&self) -> Result<Observation> {
-        // FileBasicInformation, FileStandardInformation, FileInternalInformation.
-        // Fail closed if the server cannot provide these observations.
-        let basic = self.query(4, 40).await?;
-        let standard = self.query(5, 24).await?;
-        let internal = self.query(6, 8).await?;
-        let observation = observation(&basic, &standard, &internal)?;
-        crate::content_metadata::require_plain_streams(&self.query(22, 64 * 1024).await?)?;
-        Ok(observation)
-    }
-
-    async fn query(&self, class: u8, length: u32) -> Result<Vec<u8>> {
-        let request = QueryInfoRequest {
-            info_type: InfoType::File,
-            file_info_class: class,
-            output_buffer_length: length,
-            additional_information: 0,
-            flags: 0,
-            file_id: self.file,
-            input_buffer: vec![],
+            path: path.to_owned(),
         };
-        let frame = self.execute(Command::QueryInfo, &request).await?;
-        Ok(QueryInfoResponse::unpack(&mut ReadCursor::new(&frame.body))?.output_buffer)
+        if opened.create_action != CreateAction::FileOpened {
+            return Err(Error::Smb(smb2::ErrorKind::InvalidData));
+        }
+        lifetime.0 = None;
+        Ok(reader)
+    }
+
+    pub(crate) async fn snapshot(&self) -> Result<crate::held_metadata::Snapshot> {
+        crate::held_metadata::View::new(&self.connection, self.tree, self.file, &self.cancel)
+            .snapshot(&self.path)
+            .await
+    }
+    pub(crate) fn invalidate(&self) {
+        self.connection.mark_dead();
     }
 
     pub async fn read_at(&self, offset: u64, length: u64) -> Result<Vec<u8>> {
@@ -150,13 +119,7 @@ impl GuardedRead {
                 read_channel_info: vec![],
             };
             let frame = self.execute(Command::Read, &request).await?;
-            let response = ReadResponse::unpack(&mut ReadCursor::new(&frame.body))?;
-            // A hydration of an observed range must return exactly that range.
-            // Short reads, including a concurrent truncation, fail the transfer.
-            if response.data.len() != count as usize {
-                return Err(Error::Changed);
-            }
-            bytes.extend_from_slice(&response.data);
+            bytes.extend_from_slice(&exact_read_data(&frame.body, count)?);
         }
         Ok(bytes)
     }
@@ -174,7 +137,7 @@ impl GuardedRead {
         Ok(frame)
     }
 
-    pub async fn close(mut self) -> smb2::Result<()> {
+    async fn close_leaf(&mut self) -> smb2::Result<()> {
         let request = CloseRequest {
             flags: 0,
             file_id: self.file,
@@ -183,15 +146,39 @@ impl GuardedRead {
             .connection
             .execute(Command::Close, &request, Some(self.tree))
             .await?;
+        if frame.header.command != Command::Close {
+            return Err(smb2::Error::invalid_data(
+                "unexpected checked close command",
+            ));
+        }
         if frame.header.status != NtStatus::SUCCESS {
             return Err(smb2::Error::Protocol {
                 status: frame.header.status,
                 command: Command::Close,
             });
         }
+        CloseResponse::unpack(&mut ReadCursor::new(&frame.body))?;
         self.closed = true;
-        if let Some(ancestors) = self.ancestors.take() {
-            ancestors.close().await;
+        Ok(())
+    }
+
+    pub(crate) async fn close_checked(mut self) -> Result<()> {
+        let leaf = tokio::time::timeout(crate::CLEANUP_TIMEOUT, self.close_leaf())
+            .await
+            .map_err(|_| Error::Cleanup)
+            .and_then(|r| r.map_err(Error::from));
+        let parents = if let Some(ancestors) = self.ancestors.take() {
+            ancestors.close_checked().await
+        } else {
+            Ok(())
+        };
+        if leaf.is_err() || parents.is_err() {
+            self.connection.mark_dead();
+        }
+        leaf?;
+        parents?;
+        if self.cancel.is_cancelled() {
+            return Err(Error::Cancelled);
         }
         Ok(())
     }
@@ -207,15 +194,25 @@ impl Drop for GuardedRead {
     }
 }
 
-fn read_request(path: &str) -> CreateRequest {
+struct OpenLifetime(Option<Connection>);
+impl Drop for OpenLifetime {
+    fn drop(&mut self) {
+        if let Some(connection) = &self.0 {
+            connection.mark_dead();
+        }
+    }
+}
+fn read_access() -> u32 {
+    FileAccessMask::FILE_READ_DATA
+        | FileAccessMask::FILE_READ_ATTRIBUTES
+        | FileAccessMask::FILE_READ_EA
+        | FileAccessMask::SYNCHRONIZE
+}
+fn read_request(path: &str, access: u32) -> CreateRequest {
     CreateRequest {
         requested_oplock_level: OplockLevel::None,
         impersonation_level: ImpersonationLevel::Impersonation,
-        desired_access: FileAccessMask::new(
-            FileAccessMask::FILE_READ_DATA
-                | FileAccessMask::FILE_READ_ATTRIBUTES
-                | FileAccessMask::SYNCHRONIZE,
-        ),
+        desired_access: FileAccessMask::new(access),
         file_attributes: 0,
         share_access: ShareAccess(ShareAccess::FILE_SHARE_READ),
         create_disposition: CreateDisposition::FileOpen,
@@ -226,6 +223,9 @@ fn read_request(path: &str) -> CreateRequest {
 }
 
 fn require_success(frame: &Frame, command: Command) -> Result<()> {
+    if frame.header.command != command {
+        return Err(Error::Smb(smb2::ErrorKind::InvalidData));
+    }
     if frame.header.status == NtStatus(0xC000_0003) {
         return Err(Error::Smb(smb2::ErrorKind::Unsupported));
     }
@@ -239,72 +239,30 @@ fn require_success(frame: &Frame, command: Command) -> Result<()> {
     Ok(())
 }
 
-fn observation(basic: &[u8], standard: &[u8], internal: &[u8]) -> Result<Observation> {
-    if basic.len() < 40 || standard.len() < 24 || internal.len() < 8 {
+fn exact_read_data(body: &[u8], expected: u32) -> Result<Vec<u8>> {
+    if body.len() < 16 || u16::from_le_bytes([body[0], body[1]]) != 17 {
         return Err(Error::Smb(smb2::ErrorKind::InvalidData));
     }
-    let mut basic = ReadCursor::new(basic);
-    let created = basic.read_u64_le()?;
-    basic.read_u64_le()?; // Access time may change because of this read itself.
-    let modified = basic.read_u64_le()?;
-    let changed = basic.read_u64_le()?;
-    let attributes = basic.read_u32_le()?;
-    if attributes & 0x400 != 0 {
-        return Err(Error::Smb(smb2::ErrorKind::Unsupported));
-    }
-    let mut standard = ReadCursor::new(standard);
-    standard.read_u64_le()?; // Allocation size is not content length.
-    let size = standard.read_u64_le()?;
-    standard.read_u32_le()?; // Number of links.
-    let delete_pending = standard.read_u8()?;
-    let directory = standard.read_u8()?;
-    if delete_pending != 0 || directory != 0 || attributes & 0x10 != 0 {
+    let length = u32::from_le_bytes(body[4..8].try_into().unwrap());
+    if length < expected {
         return Err(Error::Changed);
     }
-    Ok(Observation {
-        size,
-        created,
-        modified,
-        changed,
-        attributes,
-        index: ReadCursor::new(internal).read_u64_le()?,
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn metadata_rejects_truncation_directory_and_delete_pending() {
-        let basic = [0; 40];
-        let mut standard = [0; 24];
-        let internal = [0; 8];
-        assert!(observation(&basic[..39], &standard, &internal).is_err());
-        assert!(observation(&basic, &standard[..23], &internal).is_err());
-        standard[20] = 1;
-        assert!(observation(&basic, &standard, &internal).is_err());
-        standard[20] = 0;
-        standard[21] = 1;
-        assert!(observation(&basic, &standard, &internal).is_err());
+    if length > expected {
+        return Err(Error::Smb(smb2::ErrorKind::InvalidData));
     }
-
-    #[test]
-    fn access_time_is_excluded_but_size_and_change_time_are_observed() {
-        let mut basic = [0; 40];
-        let mut standard = [0; 24];
-        let internal = [0; 8];
-        let initial = observation(&basic, &standard, &internal).unwrap();
-        basic[8] = 1;
-        assert_eq!(observation(&basic, &standard, &internal).unwrap(), initial);
-        basic[24] = 1;
-        assert_ne!(observation(&basic, &standard, &internal).unwrap(), initial);
-        basic[24] = 0;
-        standard[8] = 1;
-        assert_ne!(observation(&basic, &standard, &internal).unwrap(), initial);
-    }
+    let start = (body[2] as usize)
+        .checked_sub(64)
+        .filter(|s| *s >= 16)
+        .ok_or(Error::Smb(smb2::ErrorKind::InvalidData))?;
+    let end = start
+        .checked_add(length as usize)
+        .ok_or(Error::Smb(smb2::ErrorKind::InvalidData))?;
+    Ok(body
+        .get(start..end)
+        .ok_or(Error::Smb(smb2::ErrorKind::InvalidData))?
+        .to_vec())
 }
 
 #[cfg(test)]
 #[path = "guarded_read_wire_tests.rs"]
-mod wire_tests;
+mod tests;

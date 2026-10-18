@@ -236,6 +236,7 @@ impl Handle {
         .await
         .map_err(|_| Error::Cleanup)??;
         success(&frame, Command::Close)?;
+        CloseResponse::unpack(&mut ReadCursor::new(&frame.body))?;
         self.closed = true;
         Ok(())
     }
@@ -252,6 +253,9 @@ impl Drop for Handle {
 }
 
 fn success(frame: &Frame, command: Command) -> Result<()> {
+    if frame.header.command != command {
+        return Err(Error::Smb(smb2::ErrorKind::InvalidData));
+    }
     if frame.header.status == NtStatus(0xC000_0003) {
         return Err(Error::Smb(smb2::ErrorKind::Unsupported));
     }

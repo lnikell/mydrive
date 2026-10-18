@@ -240,7 +240,7 @@ actor DomainCoordinator {
         let temporary = try manager.temporaryDirectoryURL().appendingPathComponent(UUID().uuidString)
         do {
             let client = try await operationClient()
-            let downloaded = try await client.download(path: path, to: temporary) { completed in
+            let downloaded = try await client.downloadForHydration(path: path, to: temporary) { completed in
                 transfer.received(completed)
             }
             try transfer.finish {
@@ -279,6 +279,11 @@ actor DomainCoordinator {
         let result: CatalogItem
         do { result = try await mutationAdapter().write(input, create: create, progress: progress) }
         catch { await recordMutationFailure(error); throw error }
+        if !create, input.hasOnlyUnsupportedMetadata {
+            let item = try await providerItem(result)
+            try checkActive()
+            return item
+        }
         // Publication succeeded already. A failed notification must not turn a
         // committed upload into a second remote write on the next callback.
         await recordMutationPublication()

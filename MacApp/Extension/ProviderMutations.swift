@@ -21,6 +21,20 @@ struct ProviderMutations: Sendable {
 
     func write(_ requested: MutationInput, create: Bool, progress: Progress) async throws -> CatalogItem {
         try await checkActive()
+        // Unsupported metadata stays pending with File Provider. Reading the
+        // current item consumes no package content or namespace change.
+        if !create, requested.hasOnlyUnsupportedMetadata {
+            guard let current = try await catalog.item(id: requested.id), !current.isDeleted else {
+                throw ProviderErrors.noSuchItem()
+            }
+            _ = try requested.mergingUnchanged(current)
+            guard try await catalog.relativePath(id: current.id) != nil else {
+                throw MutationInput.unsupported("The selected item's folder hierarchy needs a refresh. Its NAS contents are preserved.")
+            }
+            try await checkActive()
+            progress.completedUnitCount = 1
+            return current
+        }
         if try await ProviderTreeImport(mutations: self).handles(requested, create: create) {
             return try await importTree(requested, progress: progress)
         }

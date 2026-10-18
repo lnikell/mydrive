@@ -134,7 +134,7 @@ def main():
     operation = request["operation"]
     kind = operation["type"]
     expected = {"probe": {"type"}, "list": {"type", "path"},
-                "read": {"type", "path", "destination"}, "stat": {"type", "path"},
+                "read": {"type", "path", "destination"}, "hydrate": {"type", "path", "destination"}, "stat": {"type", "path"},
                 "mutate": {"type", "request"}, "reconcile": {"type", "request"}}[kind]
     if "delete_scope" in operation:
         assert kind in {"stat", "list"}
@@ -146,6 +146,10 @@ def main():
         validate_tree_scope(operation["tree_scope"], operation["path"])
     assert set(operation) == expected
     assert all(type(operation[key]) is str for key in expected if key not in {"request", "delete_scope", "tree_scope"})
+    if operation.get("path", "").startswith("__route_read__/"):
+        assert kind == "read"
+    if operation.get("path", "").startswith("__route_hydrate__/"):
+        assert kind == "hydrate"
     emit({"type": "connected"})
     if operation.get("path") == "__unsupported__":
         emit({"type": "error", "code": "unsupported", "message": "Synthetic unsupported file feature."})
@@ -183,7 +187,20 @@ def main():
         elif operation["path"] == "__listing__/reparse":
             directory["attributes"] |= 0x400
         emit({"type": "complete", "result": result})
-    elif kind == "read":
+    elif kind in {"read", "hydrate"}:
+        if operation["path"].startswith("__download_terminal__/"):
+            mode = operation["path"].rsplit("/", 1)[-1]
+            with open(operation["destination"], "xb") as output:
+                output.write(b"abc")
+            result = {"bytes": 3, "entry": entry(mode, 3)}
+            if mode == "directory": result["entry"]["directory"] = True
+            elif mode == "negative": result["entry"]["bytes"] = -1
+            elif mode == "mismatched": result["bytes"] = 4
+            elif mode == "missing-entry": result.pop("entry")
+            elif mode == "missing-bytes": result.pop("bytes")
+            elif mode == "overflow": result["entry"]["bytes"] = 1 << 63
+            emit({"type": "complete", "result": result})
+            return
         if operation["path"].startswith("__progress__/"):
             progress_case(operation)
             return

@@ -105,6 +105,7 @@ private enum TransportOperation: Encodable, Sendable {
     case probe
     case list(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
     case read(path: String, destination: String, treeScope: SMBTreeScope?)
+    case hydrate(path: String, destination: String)
     case stat(path: String, deleteScope: SMBDeleteScope?, treeScope: SMBTreeScope?)
     case mutate(SMBMutationRequest)
     case reconcile(SMBMutationRequest)
@@ -114,6 +115,7 @@ private enum TransportOperation: Encodable, Sendable {
         case .probe: "probe"
         case .list: "list"
         case .read: "read"
+        case .hydrate: "hydrate"
         case .stat: "stat"
         case .mutate: "mutate"
         case .reconcile: "reconcile"
@@ -140,6 +142,9 @@ private enum TransportOperation: Encodable, Sendable {
             try values.encode(path, forKey: .path)
             try values.encode(destination, forKey: .destination)
             try values.encodeIfPresent(treeScope, forKey: .tree_scope)
+        case .hydrate(let path, let destination):
+            try values.encode(path, forKey: .path)
+            try values.encode(destination, forKey: .destination)
         case .mutate(let request), .reconcile(let request):
             try values.encode(request, forKey: .request)
         }
@@ -223,7 +228,20 @@ struct SMBClient: Sendable {
     func download(path: String, to destination: URL, treeScope: SMBTreeScope? = nil,
                   progress: @escaping @Sendable (Int64) -> Void) async throws -> RemoteEntry {
         if let treeScope, !treeScope.isValid || !treeScope.containsPayload(path) { throw SMBClientError.invalidResponse }
-        let result = try await run(.read(path: path, destination: destination.path, treeScope: treeScope), progress: progress)
+        return try await download(.read(path: path, destination: destination.path, treeScope: treeScope),
+                                  to: destination, progress: progress)
+    }
+
+    /// File Provider replica hydration has an explicit synchronization purpose.
+    /// Mutation verification and private tree reads keep the strict read API.
+    func downloadForHydration(path: String, to destination: URL,
+                              progress: @escaping @Sendable (Int64) -> Void) async throws -> RemoteEntry {
+        try await download(.hydrate(path: path, destination: destination.path), to: destination, progress: progress)
+    }
+
+    private func download(_ operation: TransportOperation, to destination: URL,
+                          progress: @escaping @Sendable (Int64) -> Void) async throws -> RemoteEntry {
+        let result = try await run(operation, progress: progress)
         guard let entry = result?.entry else {
             try? FileManager.default.removeItem(at: destination)
             throw SMBClientError.invalidResponse
@@ -334,6 +352,8 @@ private actor TransportReceiver {
     private var lastProgress: Int64 = 0
     private var result: TransportEvent.Completion?
 
+    private var isDownload: Bool { command == "read" || command == "hydrate" }
+
     init(command: String, uploadLimit: Int64?, onPage: (@Sendable ([RemoteEntry]) async throws -> Void)?,
          progress: (@Sendable (Int64) -> Void)?) {
         self.command = command
@@ -360,7 +380,7 @@ private actor TransportReceiver {
             guard command == "list", let entries = event.entries else { throw SMBClientError.invalidResponse }
             try await onPage?(entries.map(\.observation))
         case "progress":
-            guard (command == "read" || command == "mutate" && uploadLimit != nil),
+            guard (isDownload || command == "mutate" && uploadLimit != nil),
                   let bytes = event.bytes, bytes >= lastProgress,
                   uploadLimit.map({ bytes <= $0 }) ?? true else {
                 throw SMBClientError.invalidResponse
@@ -372,7 +392,7 @@ private actor TransportReceiver {
         case "complete":
             guard let result = event.result else { throw SMBClientError.invalidResponse }
             if command == "list", result.complete != true { throw SMBClientError.invalidResponse }
-            if command == "read" {
+            if isDownload {
                 guard let entry = result.entry, !entry.directory, entry.bytes >= 0,
                       result.bytes == entry.bytes, entry.bytes >= lastProgress else {
                     throw SMBClientError.invalidResponse
@@ -380,7 +400,7 @@ private actor TransportReceiver {
             }
             self.result = result
             complete = true
-            if command == "read", let bytes = result.bytes { progress?(bytes) }
+            if isDownload, let bytes = result.bytes { progress?(bytes) }
         default: throw SMBClientError.invalidResponse
         }
     }

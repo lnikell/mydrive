@@ -9,7 +9,7 @@ use crate::{
 use smb2::{
     client::connection::Connection,
     msg::{
-        close::CloseRequest,
+        close::{CloseRequest, CloseResponse},
         create::{
             CreateDisposition, CreateRequest, CreateResponse, ImpersonationLevel, ShareAccess,
         },

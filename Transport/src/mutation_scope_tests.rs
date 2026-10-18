@@ -2,7 +2,7 @@
 //! no socket, NAS write, or pathname-only substitute for the held identities.
 use super::{parent_tests::*, *};
 use crate::mutation::{DeleteScope, DirectoryIdentity, MutationKind, Outcome};
-use crate::test_wire::{connection, reply, Empty};
+use crate::test_wire::{connection, reply};
 use serde_json::json;
 use smb2::msg::header::Header;
 
@@ -100,7 +100,7 @@ async fn replaced_selection_or_parent_refuses_before_any_child_or_data_rpc() {
                 2
             };
             for _ in 0..count {
-                reply(&mock, Command::Close, &Empty);
+                reply(&mock, Command::Close, &crate::test_wire::Closed);
             }
             let mut io = owner(connection, CancellationToken::new());
             let selection = scope();
@@ -166,8 +166,8 @@ async fn unchanged_selection_keeps_both_reservations_through_scoped_absence_stat
     missing(&mock);
     assert!(io.stat("selection/missing").await.unwrap().is_none());
     assert_eq!(io.parents.len(), 2); // no early fence close on missing leaf
-    reply(&mock, Command::Close, &Empty);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     io.close_checked().await.unwrap();
     mock.assert_fully_consumed();
     mock.close();
@@ -182,9 +182,9 @@ async fn exact_root_stat_proves_absence_under_parent_or_rejects_a_replacement() 
             missing(&mock);
         } else {
             observed_parent(&mock, 99, 11, DIRECTORY);
-            reply(&mock, Command::Close, &Empty);
+            reply(&mock, Command::Close, &crate::test_wire::Closed);
         }
-        reply(&mock, Command::Close, &Empty);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
         let mut io = owner(connection, CancellationToken::new());
         let selection = scope();
         io.reserve_ancestors(
@@ -218,7 +218,7 @@ async fn exact_root_delete_skips_only_its_own_reservation_and_keeps_parent_guard
     assert_eq!(request.scope_snapshots(), [("", identity(20))]);
     let (connection, mock) = connection().await;
     observed_parent(&mock, 20, 21, DIRECTORY);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let mut io = owner(connection, CancellationToken::new());
     io.reserve_ancestors(
         &[&request.path],

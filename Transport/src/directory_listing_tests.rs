@@ -1,6 +1,6 @@
 //! Actual SMB frames exercise handle identity and bounded scan completion.
 use super::*;
-use crate::test_wire::{connection, reply, Empty};
+use crate::test_wire::{connection, reply};
 use smb2::{
     msg::{
         create::{CreateAction, CreateRequest, CreateResponse},
@@ -135,7 +135,7 @@ async fn complete_listing_observes_the_actual_reserved_handle_before_and_after_q
     );
     status(&mock, Command::QueryDirectory, NtStatus::NO_MORE_FILES);
     observed(&mock, 44, 16);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let mut names = vec![];
     let result = read_reserved(handle(connection).await, None, "folder", None, |entries| {
         names.extend(entries.into_iter().map(|entry| entry.name));
@@ -211,9 +211,9 @@ async fn page_limit_returns_partial_and_class_fallback_stays_on_original_handle(
         32,
     );
     observed_file(&mock);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     observed(&mock, 44, 16);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let listing = read_reserved(
         handle(connection).await,
         None,
@@ -259,7 +259,7 @@ async fn unqualified_directory_or_post_listing_identity_never_returns_completion
             status(&mock, Command::QueryDirectory, NtStatus::NO_MORE_FILES);
             observed(&mock, after_index, 16);
         }
-        reply(&mock, Command::Close, &Empty);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
         assert!(
             read_reserved(handle(connection).await, None, "folder", None, |_| Ok(()))
                 .await
@@ -290,7 +290,7 @@ async fn truncated_batch_and_failed_close_cannot_claim_a_complete_scan() {
                     output_buffer: bytes,
                 },
             );
-            reply(&mock, Command::Close, &Empty);
+            reply(&mock, Command::Close, &crate::test_wire::Closed);
         }
         assert!(
             read_reserved(handle(connection).await, None, "folder", None, |_| panic!(

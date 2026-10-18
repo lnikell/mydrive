@@ -57,6 +57,14 @@ private final class FakeEnumerator: NSObject, NSFileProviderEnumerator, @uncheck
 private struct AdapterTests {
     @MainActor
     static func main() async throws {
+        if CommandLine.arguments == [CommandLine.arguments[0], "--package-metadata-only"] {
+            var count = try await MutationMetadataOnlyTests.run()
+            #if MYDRIVE_DEVELOPMENT
+            count += try DevelopmentPayloadShapeTests.run()
+            #endif
+            print("PASS \(count) package metadata-only groups; no NAS or registered Domain")
+            return
+        }
         if CommandLine.arguments.count == 3, CommandLine.arguments[1] == "--hold-lease" {
             let lease = try DomainOwnerLease(at: URL(fileURLWithPath: CommandLine.arguments[2]))
             defer { lease.release() }
@@ -253,6 +261,7 @@ private struct AdapterTests {
         checkCount += try await MutationTests.run()
         checkCount += try await MutationRecoveryTests.run()
         checkCount += try await MutationRepresentationTests.run()
+        checkCount += try await MutationMetadataOnlyTests.run()
         checkCount += try await LocalTreeSnapshotTests.run()
         checkCount += try await TreeImportTests.run()
         checkCount += try await TreeLayoutTests.run()

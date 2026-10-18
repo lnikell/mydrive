@@ -140,7 +140,12 @@ async fn shuffled_hash_replies_keep_file_order_and_completed_ranges_count_toward
     let closing = handle.close();
     let (closed, ()) = tokio::join!(closing, async {
         let all = sent(&mock, WINDOW + 2).await;
-        answer(&mock, all.last().unwrap(), NtStatus::SUCCESS, &Empty);
+        answer(
+            &mock,
+            all.last().unwrap(),
+            NtStatus::SUCCESS,
+            &crate::test_wire::Closed,
+        );
     });
     closed.unwrap();
     mock.assert_fully_consumed();

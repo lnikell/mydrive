@@ -37,10 +37,10 @@ async fn fallback_directory_gets_a_real_child_identity_under_its_own_readonly_ha
         16,
     );
     observed(&mock, 99, 16);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     status(&mock, Command::QueryDirectory, NtStatus::NO_MORE_FILES);
     observed(&mock, 44, 16);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let listing = read_reserved(handle(connection).await, None, "folder", None, |entries| {
         assert_eq!(entries[0].name, "subfolder");
         assert!(entries[0].directory);
@@ -95,8 +95,8 @@ async fn fallback_child_replacement_cannot_be_adopted_by_name() {
         16,
     );
     observed(&mock, 99, 16);
-    reply(&mock, Command::Close, &Empty);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let result = read_reserved(handle(connection).await, None, "folder", None, |_| {
         panic!("replacement must not publish")
     })
@@ -121,7 +121,7 @@ async fn fallback_reparse_child_is_listed_without_following_or_inventing_its_ide
     );
     status(&mock, Command::QueryDirectory, NtStatus::NO_MORE_FILES);
     observed(&mock, 44, 16);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let listing = read_reserved(handle(connection).await, None, "folder", None, |entries| {
         assert_eq!(entries[0].index_number, None);
         assert_eq!(entries[0].attributes & 0x400, 0x400);

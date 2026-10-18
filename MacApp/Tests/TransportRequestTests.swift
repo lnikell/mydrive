@@ -35,6 +35,72 @@ private final class ByteSamples: @unchecked Sendable {
         return result
     }
 
+    private static func hydration(_ client: SMBClient, root: URL, paths: [String]) async throws {
+        for (index, original) in paths.enumerated() {
+            let path = "__route_hydrate__/" + original
+            let destination = root.appendingPathComponent("hydration-\(index)-r\u{e9}sultat.txt")
+            let entry = try await client.downloadForHydration(path: path, to: destination) { _ in }
+            try check(try Data(contentsOf: destination) == Data(path.utf8) && entry.kind == .file,
+                      "Typed hydration changed exact UTF-8 names, local destination or file metadata")
+        }
+        let strictPath = "__route_read__/" + paths[0]
+        let strictDestination = root.appendingPathComponent("verification-read")
+        _ = try await client.download(path: strictPath, to: strictDestination) { _ in }
+        try check(try Data(contentsOf: strictDestination) == Data(strictPath.utf8),
+                  "The strict download route stopped using the read operation")
+        print("PASS hydration sends only its typed path/destination while ordinary verification keeps strict read; exact NFC/NFD bytes survive")
+
+        for (mode, expected): (String, [Int64]) in [
+            ("small", [1, 10, 20]), ("large", [1, 1 << 32, (1 << 32) + 20]), ("empty", [0])
+        ] {
+            let samples = ByteSamples()
+            let entry = try await client.downloadForHydration(path: "__progress__/" + mode,
+                to: root.appendingPathComponent("hydrate-" + mode), progress: samples.append)
+            try check(samples.values == expected && entry.size == expected.last,
+                      "Hydration lost monotonic, Int64 or exact empty-file completion progress")
+        }
+        for (mode, expected): (String, [Int64]) in [
+            ("decreasing", [10]), ("negative", []), ("terminal-decreasing", [21]), ("integer-overflow", [])
+        ] {
+            let samples = ByteSamples()
+            var rejected = false
+            do {
+                _ = try await client.downloadForHydration(path: "__progress__/" + mode,
+                    to: root.appendingPathComponent("hydrate-" + mode), progress: samples.append)
+            } catch SMBClientError.invalidResponse { rejected = true }
+            try check(rejected && samples.values == expected,
+                      "Invalid hydration progress reached its callback or terminal success")
+        }
+        for mode in ["directory", "negative", "mismatched", "missing-entry", "missing-bytes", "overflow"] {
+            var rejected = false
+            do {
+                _ = try await client.downloadForHydration(path: "__download_terminal__/" + mode,
+                    to: root.appendingPathComponent("hydrate-terminal-" + mode)) { _ in }
+            } catch SMBClientError.invalidResponse { rejected = true }
+            try check(rejected, "An invalid hydration terminal receipt was published")
+        }
+        print("PASS actual hydration subprocess progress and terminal metadata reject regressions, overflow, directory/missing/size-mismatched results")
+
+        let samples = ByteSamples(), stream = AsyncStream<Int64>.makeStream()
+        let transfer = Task {
+            defer { stream.continuation.finish() }
+            return try await client.downloadForHydration(path: "__progress__/cancel", to: root.appendingPathComponent("hydrate-cancel")) {
+                samples.append($0); stream.continuation.yield($0)
+            }
+        }
+        var iterator = stream.stream.makeAsyncIterator()
+        try check(await iterator.next() == 1, "Hydration cancellation fixture never reported first actual bytes")
+        transfer.cancel()
+        var cancelled = false
+        do { _ = try await transfer.value } catch is CancellationError { cancelled = true }
+        try check(cancelled && samples.values == [1], "Cancelled hydration published further bytes or a terminal receipt")
+        do {
+            _ = try await client.downloadForHydration(path: "__unsupported__", to: root.appendingPathComponent("hydrate-unsupported")) { _ in }
+            throw CocoaError(.fileReadCorruptFile)
+        } catch SMBClientError.unsupportedFeature {}
+        print("PASS hydration cancellation drains the actual helper and unsupported metadata remains a preserving typed error")
+    }
+
     static func main() async throws {
         guard CommandLine.arguments.count == 2 else { throw SMBClientError.invalidResponse }
         let helper = URL(fileURLWithPath: CommandLine.arguments[1])
@@ -117,6 +183,7 @@ private final class ByteSamples: @unchecked Sendable {
             try check(observation.size == Int64(path.utf8.count), "Read completion metadata did not match fixture content")
         }
         print("PASS typed probe/read requests, Unicode local destinations and complete response routing")
+        try await hydration(client, root: root, paths: [composed, decomposed, "--looks-like-an-option"])
 
         for (mode, expected): (String, [Int64]) in [
             ("small", [1, 10, 20]), ("large", [1, 1 << 32, (1 << 32) + 20]), ("empty", [0])

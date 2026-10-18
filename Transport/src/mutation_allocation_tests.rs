@@ -126,14 +126,14 @@ async fn allocation_acknowledges_empty_object_after_creation_time_and_security_b
     reply(&mock, Command::Flush, &Empty);
     observed(&mock, 0, 10, 32);
     plain(&mock);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     create(&mock, 10);
     observed(&mock, 0, 10, 32);
     plain(&mock);
     query(&mock, security());
     observed(&mock, 0, 10, 32);
-    reply(&mock, Command::Close, &Empty);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let mut request = request();
     request.kind = mutation::MutationKind::ReplaceFile;
     request.expected = Some(Entry {
@@ -208,7 +208,7 @@ async fn restart_refuses_replaced_oversized_linked_reparse_forked_or_resecured_s
                 }
             }
         }
-        reply(&mock, Command::Close, &Empty);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
         let root =
             std::env::temp_dir().join(format!("mydrive-allocation-{}-{fault}", std::process::id()));
         tokio::fs::write(&root, b"abc").await.unwrap();

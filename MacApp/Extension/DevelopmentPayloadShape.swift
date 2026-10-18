@@ -11,8 +11,9 @@ struct DevelopmentPayloadShape: Sendable {
     let errorCode: Int32
     let contentType: String
 
-    static func inspect(_ url: URL, contentType: String) -> Self {
+    static func inspect(_ url: URL?, contentType: String) -> Self {
         let type = String(contentType.prefix(128))
+        guard let url else { return Self(kind: "none", size: -1, errorCode: 0, contentType: type) }
         let descriptor = url.withUnsafeFileSystemRepresentation { path in
             guard let path else { return Int32(-1) }
             return open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
@@ -38,7 +39,7 @@ struct DevelopmentPayloadShape: Sendable {
     }
 
     static func observe(_ url: URL?, contentType: String, operation: String, fields: UInt, options: UInt) {
-        guard AppStorage.isDevelopmentStorage, let url else { return }
+        guard AppStorage.isDevelopmentStorage else { return }
         let shape = inspect(url, contentType: contentType)
         let operation = operation == "create" ? "create" : "modify"
         let log = Logger(subsystem: "local.mydrive.provider", category: "payload-shape")

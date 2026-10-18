@@ -36,7 +36,7 @@ async fn short_writes_advance_only_confirmed_bytes_on_the_same_handle() {
     let (connection, mock) = connection().await;
     reply(&mock, Command::Write, &written(2));
     reply(&mock, Command::Write, &written(1));
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let handle = handle(connection, CancellationToken::new());
     handle.write_all(10, b"abc").await.unwrap();
     handle.close().await.unwrap();
@@ -89,7 +89,7 @@ async fn destructive_open_denies_other_smb_writers_and_deleters_and_does_not_fol
             create_contexts: vec![],
         },
     );
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     Handle::open(
         connection,
         TreeId(1),
@@ -137,7 +137,7 @@ async fn read_ancestor_reservation_denies_conversion_and_rejects_reparse_directo
             },
         );
         if attributes & 0x400 == 0 {
-            reply(&mock, Command::Close, &Empty);
+            reply(&mock, Command::Close, &crate::test_wire::Closed);
         }
         let result = Handle::open(
             connection,
@@ -272,8 +272,8 @@ async fn ignored_or_denied_security_at_create_never_uploads_or_archives_bytes() 
             let mut widened = crate::mutation_security::fixture();
             widened[16..20].copy_from_slice(&0u32.to_le_bytes());
             query_reply(&mock, widened);
-            reply(&mock, Command::Close, &Empty);
-            reply(&mock, Command::Close, &Empty);
+            reply(&mock, Command::Close, &crate::test_wire::Closed);
+            reply(&mock, Command::Close, &crate::test_wire::Closed);
         }
         let mut io = MutationIO {
             connection,
@@ -375,7 +375,7 @@ async fn prepared_receipt_observes_and_hashes_the_closed_writer() {
     observation_reply(&mock, 3, 4);
     query_reply(&mock, crate::mutation_security::fixture());
     reply(&mock, Command::Flush, &Empty);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     create_reply(&mock, 2);
     observation_reply(&mock, 10, 11);
     plain_reply(&mock);
@@ -391,7 +391,7 @@ async fn prepared_receipt_observes_and_hashes_the_closed_writer() {
         },
     );
     observation_reply(&mock, 10, 11);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let root = std::env::temp_dir().join(format!("mydrive-stage-lifetime-{}", std::process::id()));
     tokio::fs::create_dir_all(&root).await.unwrap();
     let source = root.join("payload");
@@ -504,7 +504,7 @@ async fn name_derived_hidden_attribute_is_the_only_accepted_rename_delta() {
         observed(before);
         reply(&mock, Command::SetInfo, &Empty);
         observed(after);
-        reply(&mock, Command::Close, &Empty);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
         let handle = handle(connection, CancellationToken::new());
         let expected = Entry {
             name: source.into(),

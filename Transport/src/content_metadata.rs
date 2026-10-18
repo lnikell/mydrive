@@ -1,4 +1,4 @@
-//! One bounded stream-list policy shared by hydration and mutations.
+//! Strict unnamed-stream guard for mutation handles.
 use crate::{Error, Result};
 
 pub(crate) fn require_plain_streams(mut data: &[u8]) -> Result<()> {

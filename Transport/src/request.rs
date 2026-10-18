@@ -37,6 +37,10 @@ enum Operation {
         #[serde(default)]
         tree_scope: Option<nas_transport::mutation::TreeScope>,
     },
+    Hydrate {
+        path: String,
+        destination: String,
+    },
     Stat {
         path: String,
         #[serde(default)]
@@ -90,6 +94,11 @@ impl Request {
                 tree_scope,
             } if valid_text(&path) && valid_text(&destination) => {
                 ("read", vec![path, destination], None, None, tree_scope)
+            }
+            Operation::Hydrate { path, destination }
+                if valid_text(&path) && valid_text(&destination) =>
+            {
+                ("hydrate", vec![path, destination], None, None, None)
             }
             Operation::Stat {
                 path,
@@ -154,6 +163,34 @@ mod tests {
 
     fn parse(value: Value) -> Result<(Args, Zeroizing<String>), Error> {
         read(serde_json::to_vec(&value).unwrap().as_slice())
+    }
+
+    #[test]
+    fn hydration_is_one_full_typed_operation_and_cannot_select_verification_scopes_or_policy() {
+        let value = request(
+            json!({"type":"hydrate","path":"cafe\u{301}/file","destination":"/tmp/output"}),
+        );
+        let (args, _) = parse(value.clone()).unwrap();
+        assert_eq!(args.command, "hydrate");
+        assert_eq!(args.paths[0].as_bytes(), "cafe\u{301}/file".as_bytes());
+        assert!(
+            args.tree_scope.is_none()
+                && args.delete_scope.is_none()
+                && args.length.is_none()
+                && args.offset == 0
+        );
+        for key in [
+            "tree_scope",
+            "delete_scope",
+            "offset",
+            "length",
+            "profile",
+            "allowlist",
+        ] {
+            let mut bad = value.clone();
+            bad["operation"][key] = json!({});
+            assert!(parse(bad).is_err());
+        }
     }
 
     #[test]

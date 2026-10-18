@@ -114,7 +114,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_normalized_name_falls_back_to_server_directory_spelling() {
-        use crate::test_wire::{connection, reply, Empty};
+        use crate::test_wire::{connection, reply};
         use smb2::{
             msg::{
                 create::{CreateAction, CreateResponse},
@@ -169,8 +169,8 @@ mod tests {
                 output_buffer: entries,
             },
         );
-        reply(&mock, Command::Close, &Empty);
-        reply(&mock, Command::Close, &Empty);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
         let handle = Handle {
             connection,
             tree: TreeId(1),

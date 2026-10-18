@@ -74,3 +74,21 @@ pub(crate) struct Empty;
 impl Pack for Empty {
     fn pack(&self, _: &mut WriteCursor) {}
 }
+
+pub(crate) struct Closed;
+impl Pack for Closed {
+    fn pack(&self, cursor: &mut WriteCursor) {
+        use smb2::{msg::close::CloseResponse, pack::FileTime};
+        CloseResponse {
+            flags: 0,
+            creation_time: FileTime(0),
+            last_access_time: FileTime(0),
+            last_write_time: FileTime(0),
+            change_time: FileTime(0),
+            allocation_size: 0,
+            end_of_file: 0,
+            file_attributes: 0,
+        }
+        .pack(cursor);
+    }
+}

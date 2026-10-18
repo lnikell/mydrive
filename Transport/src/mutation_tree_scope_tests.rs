@@ -1,7 +1,7 @@
 //! Private-tree requests cross the same held-handle seam as production.
 use super::{parent_tests::*, *};
 use crate::mutation::{DirectoryIdentity, MutationKind, Outcome, TreeScope};
-use crate::test_wire::{connection, reply, Empty};
+use crate::test_wire::{connection, reply};
 use serde_json::json;
 use smb2::msg::header::Header;
 
@@ -205,7 +205,7 @@ async fn replaced_arena_or_parent_refuses_before_any_node_or_namespace_rpc() {
                 2
             };
             for _ in 0..count {
-                reply(&mock, Command::Close, &Empty);
+                reply(&mock, Command::Close, &crate::test_wire::Closed);
             }
             let request = intent(kind, &scratch());
             request.validate().unwrap();
@@ -247,7 +247,7 @@ async fn root_publication_holds_only_frozen_parent_without_self_reserving_root()
     request.validate().unwrap();
     let (connection, mock) = connection().await;
     observed_parent(&mock, 20, 21, DIRECTORY);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let mut io = owner(connection, CancellationToken::new());
     io.reserve_ancestors(
         &[&request.path, request.destination.as_deref().unwrap()],
@@ -296,7 +296,7 @@ async fn descendant_place_keeps_root_and_actual_parent_reserved_and_rejects_repl
     observed_parent(&mock, 10, 11, DIRECTORY);
     observed_parent(&mock, 99, 41, DIRECTORY);
     for _ in 0..3 {
-        reply(&mock, Command::Close, &Empty);
+        reply(&mock, Command::Close, &crate::test_wire::Closed);
     }
     let mut io = owner(connection, CancellationToken::new());
     let result = io

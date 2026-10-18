@@ -4,17 +4,18 @@
 //! mutation guard. The NAS account's ACL remains the containment control.
 //! Cancellation invalidates the session; construct a new session afterward.
 
-use futures_util::{stream::FuturesOrdered, StreamExt};
 use serde::{Deserialize, Serialize};
 use smb2::{ClientConfig, RenameOptions, SmbClient, Tree};
 use std::{path::Path, time::Duration};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 pub use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 mod connection_readiness;
 mod content_metadata;
+mod guarded_download;
 mod guarded_read;
+mod held_metadata;
 pub mod mutation;
 mod mutation_io;
 mod mutation_security;
@@ -457,18 +458,23 @@ impl Nas {
         )
         .await
         .map_err(tree_scope_error)?;
-        let result = self
-            .download(remote, local, 0, None, cancel, progress)
-            .await;
+        let result = guarded_download::run(
+            self.client.connection().clone(),
+            &self.tree,
+            remote,
+            local,
+            guarded_download::Purpose::Strict {
+                offset: 0,
+                length: None,
+            },
+            cancel,
+            progress,
+        )
+        .await;
         let closed = fences.close_checked().await.map_err(tree_scope_error);
         match (result, closed) {
-            (Ok(download), Ok(())) => Ok(download),
-            (Ok(_), Err(error)) => {
-                // download() exclusively created this destination. Never
-                // remove a preexisting destination after an open failure.
-                let _ = tokio::fs::remove_file(local).await;
-                Err(error)
-            }
+            (Ok(staged), Ok(())) => staged.finish(cancel).await,
+            (Ok(_), Err(error)) => Err(error),
             (Err(error), _) => Err(error),
         }
     }
@@ -484,84 +490,41 @@ impl Nas {
         cancel: &CancellationToken,
         mut progress: impl FnMut(u64),
     ) -> Result<Download> {
-        validate_path(remote, false)?;
-        let mut output = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(local)
-            .await?;
-        let result = self
-            .download_to(remote, &mut output, offset, length, cancel, &mut progress)
-            .await;
-        drop(output);
-        if result.is_err() {
-            let _ = tokio::fs::remove_file(local).await;
-        }
-        result
-    }
-
-    async fn download_to(
-        &mut self,
-        remote: &str,
-        output: &mut tokio::fs::File,
-        offset: u64,
-        length: Option<u64>,
-        cancel: &CancellationToken,
-        progress: &mut impl FnMut(u64),
-    ) -> Result<Download> {
-        let reader = guarded_read::GuardedRead::open(
+        guarded_download::run(
             self.client.connection().clone(),
             &self.tree,
             remote,
+            local,
+            guarded_download::Purpose::Strict { offset, length },
             cancel,
+            &mut progress,
         )
-        .await?;
-        let outcome = async {
-            let observed = reader.observe().await?;
-            let end = range_end(observed.size, offset, length)?;
-            let mut next = offset;
-            let mut completed = 0;
-            let mut pending = FuturesOrdered::new();
-            loop {
-                while next < end && pending.len() < READ_WINDOW {
-                    let size = (end - next).min(CHUNK_BYTES as u64);
-                    pending.push_back(reader.read_at(next, size));
-                    next += size;
-                }
-                let batch = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => return Err(Error::Cancelled),
-                    batch = pending.next() => batch,
-                };
-                let Some(bytes) = batch else {
-                    break;
-                };
-                let bytes = bytes?;
-                if bytes.is_empty() {
-                    return Err(Error::Changed);
-                }
-                output.write_all(&bytes).await?;
-                completed += bytes.len() as u64;
-                progress(completed);
-            }
-            if completed != end - offset {
-                return Err(Error::Changed);
-            }
-            if reader.observe().await? != observed {
-                return Err(Error::Changed);
-            }
-            output.sync_all().await?;
-            Ok(Download {
-                bytes: completed,
-                entry: observed.entry(remote),
-            })
-        }
-        .await;
-        if matches!(outcome, Err(Error::Cancelled)) {
-            self.client.connection().mark_dead();
-        }
-        let cleanup = tokio::time::timeout(CLEANUP_TIMEOUT, reader.close()).await;
-        self.finish_cleanup(outcome, cleanup)
+        .await?
+        .finish(cancel)
+        .await
+    }
+
+    /// Ordinary macOS replica hydration. The closed sync profile is never used
+    /// by strict archive, mutation or tree verification downloads.
+    pub async fn hydrate(
+        &mut self,
+        remote: &str,
+        local: &Path,
+        cancel: &CancellationToken,
+        progress: impl FnMut(u64),
+    ) -> Result<Download> {
+        guarded_download::run(
+            self.client.connection().clone(),
+            &self.tree,
+            remote,
+            local,
+            guarded_download::Purpose::Hydration,
+            cancel,
+            progress,
+        )
+        .await?
+        .finish(cancel)
+        .await
     }
 
     /// Exclusive temporary sibling + FLUSH/CLOSE + rename without replacement.
@@ -753,23 +716,6 @@ impl Nas {
             "mutations require an explicit experiment root",
         ))?;
         Ok(format!("{root}/{relative}"))
-    }
-    fn finish_cleanup<T>(
-        &self,
-        outcome: Result<T>,
-        cleanup: std::result::Result<smb2::Result<()>, tokio::time::error::Elapsed>,
-    ) -> Result<T> {
-        match cleanup {
-            Ok(Ok(())) => outcome,
-            Ok(Err(error)) => {
-                self.client.connection().mark_dead();
-                outcome.and(Err(error.into()))
-            }
-            Err(_) => {
-                self.client.connection().mark_dead();
-                outcome.and(Err(Error::Cleanup))
-            }
-        }
     }
 }
 

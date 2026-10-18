@@ -55,6 +55,10 @@ struct MutationInput: Sendable {
 
     static let supportedFields: NSFileProviderItemFields = [.filename, .parentItemIdentifier, .contents]
 
+    var hasOnlyUnsupportedMetadata: Bool {
+        contents == nil && fields.intersection(Self.supportedFields).isEmpty
+    }
+
     var pendingFields: NSFileProviderItemFields { fields.subtracting(Self.supportedFields) }
 
     static func validateName(_ name: String) throws {

@@ -1,7 +1,7 @@
 //! Parent identity checks cross the actual SMB handle seam, without sockets.
 use super::*;
 use crate::mutation::{DirectoryIdentity, MutationKind, Outcome, Receipt};
-use crate::test_wire::{connection, reply, Empty};
+use crate::test_wire::{connection, reply};
 use smb2::msg::{create::CreateAction, header::Header};
 use smb2::pack::FileTime;
 use smb2::transport::MockTransport;
@@ -96,7 +96,7 @@ async fn replaced_source_or_destination_parent_refuses_before_any_namespace_or_d
                 2
             };
             for _ in 0..count {
-                reply(&mock, Command::Close, &Empty);
+                reply(&mock, Command::Close, &crate::test_wire::Closed);
             }
             let mut io = owner(connection, CancellationToken::new());
             let result = io
@@ -129,8 +129,8 @@ async fn root_and_same_object_parent_changes_keep_real_reserved_directory_handle
     // Child activity changes timestamps/hidden flags, but not directory identity.
     observed_parent(&mock, 10, 20, DIRECTORY | 2);
     observed_parent(&mock, 30, 40, DIRECTORY);
-    reply(&mock, Command::Close, &Empty);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let mut io = owner(connection, CancellationToken::new());
     io.reserve_ancestors(
         &["file", "target/file"],
@@ -258,7 +258,7 @@ fn parent_refusal_retains_existing_recovery_evidence() {
 async fn share_root_stat_returns_real_nonzero_identity_without_a_synthetic_name() {
     let (connection, mock) = connection().await;
     observed_parent(&mock, 10, 20, DIRECTORY);
-    reply(&mock, Command::Close, &Empty);
+    reply(&mock, Command::Close, &crate::test_wire::Closed);
     let mut io = owner(connection, CancellationToken::new());
     let entry = io.stat("").await.unwrap().unwrap();
     assert_eq!(entry.name, "");
