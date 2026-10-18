@@ -117,6 +117,7 @@ struct ConnectionStore: Sendable {
             guard lstat(entry.path, &info) == 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
+            if name == "mount-options.json", info.st_mode & S_IFMT == S_IFREG { return false }
             if name == "Mutations", info.st_mode & S_IFMT == S_IFDIR {
                 return try DirectoryContents.contains(in: entry) { _ in true }
             }
@@ -135,7 +136,7 @@ struct ConnectionStore: Sendable {
     }
 
     /// Only after the system confirms that no domain is registered. Remove the
-    /// record and an empty folder; never recursively delete unknown retained work.
+    /// configuration and an empty folder; never recursively delete retained work.
     func removeUnregisteredSettings(_ settings: ConnectionSettings) throws -> URL? {
         if let previous = try existingSettings(for: settings.domainID), !settings.hasSameEndpoint(as: previous) {
             throw ConnectionStoreError.endpointChanged
@@ -145,6 +146,26 @@ struct ConnectionStore: Sendable {
         do { try FileManager.default.removeItem(at: record) }
         catch let error as NSError where error.domain == NSCocoaErrorDomain
             && [CocoaError.fileNoSuchFile.rawValue, CocoaError.fileReadNoSuchFile.rawValue].contains(error.code) { }
+        var hasOtherData = true
+        do {
+            hasOtherData = try DirectoryContents.contains(in: directory) { name in
+                guard name == "mount-options.json" else { return true }
+                var info = stat()
+                guard lstat(directory.appendingPathComponent(name).path, &info) == 0 else {
+                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                }
+                return info.st_mode & S_IFMT != S_IFREG
+            }
+        } catch let error as POSIXError where error.code == .ENOENT {
+            // A disappeared entry is not proof that the whole folder is empty.
+            // rmdir below decides, without traversing or deleting any contents.
+        }
+        if !hasOtherData {
+            let options = directory.appendingPathComponent("mount-options.json")
+            if unlink(options.path) != 0, errno != ENOENT {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+        }
         if rmdir(directory.path) == 0 || errno == ENOENT { return nil }
         if errno == ENOTEMPTY { return directory }
         throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)

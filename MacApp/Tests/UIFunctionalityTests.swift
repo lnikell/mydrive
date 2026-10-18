@@ -77,6 +77,8 @@ private actor ActiveTransfers {
             "Profile and mount options were not published together")
         try rejects { try connections.importProfile(profiles[0]) }
         try check(try connections.settings(for: profiles[0].settings.id) == profiles[0].settings, "Import replaced an existing Connection")
+        try check(try connections.removeUnregisteredSettings(profiles[0].settings) == nil,
+            "Removing an imported, never-connected profile retained only its options")
         print("PASS profile options round trip together and cannot replace an existing Connection")
 
         try await concurrency()

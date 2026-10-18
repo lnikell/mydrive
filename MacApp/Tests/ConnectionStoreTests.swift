@@ -85,6 +85,7 @@ private func rejects(_ operation: () throws -> Void) throws {
         try require(try store.removeUnregisteredSettings(settings("unas-test")) == nil, "Empty legacy settings folder was not removed")
         try require(!FileManager.default.fileExists(atPath: store.folder(for: "unas-test").path), "Removed empty folder remains")
         print("PASS confirmed-unregistered cleanup removes only its record and empty directory")
+        try profileOptions(store: store, temporary: temporary)
 
         let exported = temporary.appendingPathComponent("OS preserved work", isDirectory: true)
         try FileManager.default.createDirectory(at: exported, withIntermediateDirectories: true)
@@ -131,5 +132,50 @@ private func rejects(_ operation: () throws -> Void) throws {
         try require(try store.load().retainedFolders.contains { $0.lastPathComponent == detachedID },
                     "Readable staged work was not rediscovered")
         print("PASS directory-enumeration errors remain visible and never classify staged work as empty")
+    }
+
+    private static func profileOptions(store: ConnectionStore, temporary: URL) throws {
+        let profile = settings(UUID().uuidString.lowercased())
+        try store.save(profile)
+        let folder = try store.folder(for: profile.id)
+        let options = folder.appendingPathComponent("mount-options.json")
+        try Data("{\"downloadMBps\":2.5}".utf8).write(to: options)
+        try require(try store.removeUnregisteredSettings(profile) == nil && !FileManager.default.fileExists(atPath: folder.path),
+                    "An unconnected profile's options were reported as retained local work")
+        try require(try store.removeUnregisteredSettings(profile) == nil, "Repeated profile removal was not idempotent")
+
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        try Data("{}".utf8).write(to: options)
+        try require(try !store.load().retainedFolders.contains { $0.resolvingSymlinksInPath().path == folder.resolvingSymlinksInPath().path },
+                    "Legacy detached options were misclassified as user work")
+        let unknown = folder.appendingPathComponent("pending-work")
+        try Data("retain".utf8).write(to: unknown)
+        try require(try store.removeUnregisteredSettings(profile) == folder && FileManager.default.fileExists(atPath: options.path) &&
+                    FileManager.default.fileExists(atPath: unknown.path), "Profile cleanup changed options or unknown recovery work")
+
+        for shape in ["directory", "symlink", "fifo"] {
+            let item = settings(UUID().uuidString.lowercased())
+            try store.save(item)
+            let directory = try store.folder(for: item.id), shaped = directory.appendingPathComponent("mount-options.json")
+            let payload: URL
+            switch shape {
+            case "directory":
+                try FileManager.default.createDirectory(at: shaped, withIntermediateDirectories: false)
+                payload = shaped.appendingPathComponent("retained-data")
+                try Data("retain".utf8).write(to: payload)
+            case "symlink":
+                payload = temporary.appendingPathComponent(UUID().uuidString)
+                try Data("retain".utf8).write(to: payload)
+                try FileManager.default.createSymbolicLink(at: shaped, withDestinationURL: payload)
+            default:
+                payload = shaped
+                try require(mkfifo(shaped.path, 0o600) == 0, "Could not create options FIFO fixture")
+            }
+            try require(try store.removeUnregisteredSettings(item) == directory && FileManager.default.fileExists(atPath: payload.path),
+                        "A known options filename authorized deleting \(shape) data")
+            try require(try store.load().retainedFolders.contains { $0.resolvingSymlinksInPath().path == directory.resolvingSymlinksInPath().path },
+                        "Unexpected options \(shape) was hidden on restart")
+        }
+        print("PASS unconnected profiles remove only regular options; unknown work and unexpected file shapes survive restart")
     }
 }
