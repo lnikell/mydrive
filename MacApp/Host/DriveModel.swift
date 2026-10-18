@@ -8,6 +8,10 @@ import Observation
     private(set) var busy = false
     private(set) var status = ""
     private(set) var connectionStatus = ""
+    /// The latest automatic-refresh state, for status indicators.
+    private(set) var monitorState: ConnectionMonitor.State?
+    /// When known folders were last checked successfully in this session.
+    private(set) var lastChecked: Date?
     private(set) var isRegistered: Bool
     private let store: ConnectionStore
     private let backend: any DriveConnectionBackend
@@ -87,6 +91,8 @@ import Observation
     }
 
     private func monitorChanged(_ state: ConnectionMonitor.State) {
+        monitorState = state
+        if state == .refreshed { lastChecked = Date() }
         switch state {
         case .waiting: connectionStatus = "Checking for changes every 30 seconds while MyDrive runs."
         case .refreshing: connectionStatus = "Checking for changes…"
@@ -120,7 +126,10 @@ import Observation
         busy = true
         defer { busy = false }
         await monitor.stop()
-        do { status = try await backend.perform(action, settings: settings) }
+        do {
+            status = try await backend.perform(action, settings: settings)
+            if action == .refresh { lastChecked = Date() }
+        }
         catch { status = error is CancellationError ? "Operation cancelled." : error.localizedDescription }
         if isRegistered { await startMonitoring() }
     }

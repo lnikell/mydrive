@@ -6,26 +6,28 @@ import SwiftUI
     @Environment(\.openWindow) private var openWindow
     @State private var model = AppModel()
     @State private var updates = UpdateController()
-    @State private var addRequested = false
-    @State private var uninstallRequested = false
+    @State private var requests = WindowRequests()
 
     var body: some Scene {
         Window("MyDrive", id: "connection") {
-            ConnectionsView(model: model, addRequested: $addRequested, uninstallRequested: $uninstallRequested)
-                .frame(minWidth: 480, idealWidth: 560, minHeight: 320, idealHeight: 400)
+            MainWindow(model: model, requests: requests)
         }
-        .defaultSize(width: 560, height: 400)
+        .windowStyle(.hiddenTitleBar)
+        .defaultSize(width: 1200, height: 780)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Check for Updates…") { updates.checkForUpdates() }
                     .disabled(!updates.canCheckForUpdates || model.preparingUninstall)
                 Divider()
-                Button("Uninstall MyDrive…", action: requestUninstall)
+                Button("Uninstall MyDrive…") { requestRemoval(.uninstall) }
                     .disabled(model.busy || model.drives.contains(where: \.busy))
             }
             CommandGroup(after: .newItem) {
-                Button("Add Drive…", action: requestAdd)
+                Button("Add SMB Share…", action: requestAdd)
                     .keyboardShortcut("n", modifiers: .command)
+                    .disabled(model.busy)
+                Button("Connect to URL…", action: requestConnectURL)
+                    .keyboardShortcut("k", modifiers: .command)
                     .disabled(model.busy)
             }
             CommandGroup(replacing: .appTermination) {
@@ -34,10 +36,13 @@ import SwiftUI
                     .disabled(model.preparingUninstall)
             }
         }
-        Settings { UpdateSettingsView(updates: updates) }
+        Settings {
+            SettingsView(updates: updates, model: model) { requestRemoval(.removeAll) }
+        }
         MenuBarExtra("MyDrive", systemImage: "externaldrive.badge.wifi") {
-            Button("Show Drives") { openWindow(id: "connection") }
-            Button("Add Drive…", action: requestAdd).disabled(model.busy)
+            Button("Show Mounts") { openWindow(id: "connection") }
+            Button("Add SMB Share…", action: requestAdd).disabled(model.busy)
+            Button("Connect to URL…", action: requestConnectURL).disabled(model.busy)
             if !model.drives.isEmpty {
                 Divider()
                 ForEach(model.drives) { drive in
@@ -48,7 +53,7 @@ import SwiftUI
             Divider()
             Button("Check for Updates…") { updates.checkForUpdates() }
                 .disabled(!updates.canCheckForUpdates || model.preparingUninstall)
-            Button("Uninstall MyDrive…", action: requestUninstall)
+            Button("Uninstall MyDrive…") { requestRemoval(.uninstall) }
                 .disabled(model.busy || model.drives.contains(where: \.busy))
             Button("Quit MyDrive") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q", modifiers: .command)
@@ -59,12 +64,18 @@ import SwiftUI
     private func requestAdd() {
         guard !model.busy else { return }
         openWindow(id: "connection")
-        addRequested = true
+        requests.add = true
     }
 
-    private func requestUninstall() {
+    private func requestConnectURL() {
         guard !model.busy else { return }
         openWindow(id: "connection")
-        uninstallRequested = true
+        requests.connectToURL = true
+    }
+
+    private func requestRemoval(_ mode: RemovalMode) {
+        guard !model.busy else { return }
+        openWindow(id: "connection")
+        requests.removal = mode
     }
 }

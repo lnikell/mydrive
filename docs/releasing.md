@@ -36,7 +36,7 @@ xcrun notarytool store-credentials mydrive-notary \
 
 The command validates access with Apple before saving the credential. Set `MYDRIVE_NOTARY_KEYCHAIN_PROFILE` to `mydrive-notary` in `.local/release.json`. Team keys have access across the account's apps according to their role; this setup does not need an Admin key. Keep the credential on the release Mac and out of the app bundle, repository and GitHub settings.
 
-The original app icon has an editable vector renderer at `tools/render-app-icon.swift`. After changing its geometry, run `xcrun swift tools/render-app-icon.swift .build/icons`, then copy the generated `MyDrive.svg` and `MyDrive.icns` into `MacApp/Resources/`. The normal build includes the checked-in Retina icon in both bundles before signing; it needs no external artwork or icon-generation service.
+The app icon artwork is `MacApp/Resources/AppIconArtwork.png`: a 1024 px square crop of the folder artwork with the surrounding white space removed, so the folder spans about 72% of the icon shape. `tools/render-app-icon.swift` masks it to Apple's macOS icon grid (an 824 pt continuous-corner shape centred on a 1024 pt canvas, with the standard drop shadow). After replacing the artwork, run `xcrun swift tools/render-app-icon.swift MacApp/Resources/AppIconArtwork.png .build/icons`, then copy the generated `MyDrive.icns` into `MacApp/Resources/`. The normal build includes the checked-in Retina icon in both bundles before signing; it needs no icon-generation service.
 
 ## Future fixes and releases
 

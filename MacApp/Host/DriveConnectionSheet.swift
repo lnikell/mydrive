@@ -11,9 +11,16 @@ import SwiftUI
     @State private var submission: Task<Void, Never>?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text(isAdding ? "Add Drive" : "Reconnect \(settings.displayName)")
-                .font(.title2.weight(.semibold))
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 12) {
+                DriveBadge(kind: .smb, size: 40, style: .solid)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(isAdding ? "Add SMB Share" : "Reconnect \(settings.displayName)")
+                        .font(Typography.title3).foregroundStyle(Palette.primary)
+                    Text(isAdding ? "Mount a NAS share in Finder" : "Enter the password to resume syncing")
+                        .font(Typography.callout).foregroundStyle(Palette.secondary)
+                }
+            }
             Form {
                 if isAdding {
                     TextField("Name (optional)", text: $settings.displayName, prompt: Text("Uses the share name"))
@@ -31,34 +38,39 @@ import SwiftUI
                     .onSubmit { if canSubmit { submit() } }
             }
             .formStyle(.grouped)
+            .scrollDisabled(true)
             .frame(height: 240)
             .disabled(submitting)
             Text("Use your NAS file-sharing account. MyDrive verifies the connection before adding it to Finder.")
-                .font(.caption).foregroundStyle(.secondary)
+                .font(Typography.subheadline).foregroundStyle(Palette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if AppStorage.isDevelopmentStorage {
                 Text("This development build connects only to the configured test NAS. Credentials expire after 15 minutes.")
-                    .font(.caption).foregroundStyle(.secondary)
+                    .font(Typography.subheadline).foregroundStyle(Palette.tertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if !failure.isEmpty {
-                Text(failure).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                Text(failure).font(Typography.callout).foregroundStyle(Palette.red).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            HStack {
+            HStack(spacing: 8) {
                 if submitting {
                     ProgressView().controlSize(.small)
-                    Text("Connecting…").font(.callout).foregroundStyle(.secondary)
+                    Text("Connecting…").font(Typography.callout).foregroundStyle(Palette.secondary)
                 }
                 Spacer()
-                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(submitting)
-                Button(isAdding ? "Add Drive" : "Reconnect", action: submit)
+                Button("Cancel") { dismiss() }
+                    .buttonStyle(CardButtonStyle(height: 28, horizontalPadding: 12))
+                    .keyboardShortcut(.cancelAction).disabled(submitting)
+                Button(isAdding ? "Add Mount" : "Reconnect", action: submit)
+                    .buttonStyle(AccentButtonStyle())
                     .keyboardShortcut(.defaultAction)
-                    .buttonStyle(.borderedProminent)
                     .disabled(!canSubmit)
             }
         }
         .padding(24)
-        .frame(width: 440)
+        .frame(width: 460)
+        .background(Palette.window)
         .interactiveDismissDisabled(submitting)
         .onDisappear {
             submission?.cancel()

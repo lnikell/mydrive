@@ -62,6 +62,9 @@ import Sparkle
         ]
     }
 
+    /// When Sparkle last checked for updates, if it has.
+    var lastUpdateCheckDate: Date? { controller?.updater.lastUpdateCheckDate }
+
     static func canStart(info: [String: Any], arguments: [String]) -> Bool {
         guard info["MyDriveDevelopmentBuild"] as? Bool == false,
               !arguments.dropFirst().contains(where: { $0.hasPrefix("--probe-") }),

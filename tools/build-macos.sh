@@ -45,6 +45,8 @@ fi
 python3 "$TASK_ROOT/tools/third_party_notices.py" --app "$TASK_APP" --sparkle "$TASK_SPARKLE"
 cp "$TASK_ROOT/MacApp/Resources/MyDrive.icns" "$TASK_APP/Contents/Resources/MyDrive.icns"
 cp "$TASK_ROOT/MacApp/Resources/MyDrive.icns" "$TASK_EXTENSION/Contents/Resources/MyDrive.icns"
+# The host UI draws the design's stroke icons from these SVG files.
+cp -R "$TASK_ROOT/MacApp/Resources/Icons" "$TASK_APP/Contents/Resources/Icons"
 xcrun swiftc -sdk "$TASK_SDK" -target "$TASK_ARCH-apple-macosx15.0" -swift-version 6 -O \
   -parse-as-library -whole-module-optimization -emit-library -static -emit-module \
   -module-name MyDriveCore -I "$TASK_ROOT/Core/Sources/CSQLite" \
