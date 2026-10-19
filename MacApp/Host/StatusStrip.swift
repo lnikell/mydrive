@@ -1,84 +1,93 @@
 import SwiftUI
 
-/// The design's bottom "transfer strip". Per-file transfer progress is not
-/// reported yet, so it shows the current mount operation, or the latest result,
-/// together with saved-mount issues and retained local work.
+/// The design's bottom transfer strip. It appears while files transfer or a
+/// mount operation runs and briefly shows the result before hiding. Anything
+/// that needs attention stays in Activity › Needs attention instead.
 @MainActor struct StatusStrip: View {
     @Bindable var model: AppModel
     let log: ActivityLog
-    let showRetainedWork: () -> Void
-    let showLoadIssues: () -> Void
     let openActivity: () -> Void
+    @State private var expiredEntry: ActivityLog.Entry.ID?
+
+    /// How long a finished operation's result stays visible.
+    private static let resultDuration: Duration = .seconds(8)
 
     private var workingDrive: DriveModel? { model.drives.first(where: \.busy) }
     private var transfers: [TransferEntry] { model.transfers.map(\.entry).filter(\.active) }
     private var isWorking: Bool { model.busy || workingDrive != nil || !transfers.isEmpty }
-
-    var isVisible: Bool {
-        isWorking || log.latest != nil || !model.status.isEmpty
-            || !model.loadIssues.isEmpty || !model.retainedWork.isEmpty
+    private var recentResult: ActivityLog.Entry? {
+        guard let entry = log.latest, !entry.inProgress, entry.id != expiredEntry else { return nil }
+        return entry
     }
 
-    private var message: (title: String, detail: String?, full: String) {
+    private var message: (icon: DesignIcon?, title: String, detail: String?, full: String) {
         if let active = model.transfers.first(where: { $0.entry.active }) {
             let verb = active.drive.isPaused ? "Paused" : active.entry.direction == .uploading ? "Uploading to" : "Downloading from"
             let title = "\(verb) \(active.drive.name)"
             let detail = TransferFormat.summary(transfers)
-            return (title, detail, title + " · " + detail)
+            return (active.entry.direction == .uploading ? .arrowUp : .arrowDown, title, detail, title + " · " + detail)
         }
         if let drive = workingDrive {
-            return (drive.status.firstLine.ifEmpty("Working…"), drive.name, drive.status)
+            return (nil, drive.status.firstLine.ifEmpty("Working…"), drive.name, drive.status)
         }
         if model.busy {
-            return (model.status.firstLine.ifEmpty("Loading mounts…"), nil, model.status)
+            return (nil, model.status.firstLine.ifEmpty("Loading mounts…"), nil, model.status)
         }
-        if let entry = log.latest {
+        if let entry = recentResult {
             let detail = [entry.driveName, RelativeTime.clock(entry.date)].compactMap { $0 }.joined(separator: " · ")
-            return (entry.message.firstLine, detail, entry.message)
+            return (.check, entry.message.firstLine, detail, entry.message)
         }
-        return (model.status.firstLine, nil, model.status)
+        return (nil, "", nil, "")
     }
 
     var body: some View {
-        if isVisible {
-            let message = message
-            VStack(spacing: 10) {
-                HStack(spacing: 8) {
-                    if isWorking {
-                        ProgressView().controlSize(.mini)
-                    } else {
-                        Icon(.info, size: 14).foregroundStyle(Palette.secondary)
-                    }
-                    Text(message.title).font(Typography.bodyMedium).foregroundStyle(Palette.primary).lineLimit(1)
-                    if let detail = message.detail, !detail.isEmpty {
-                        Text(detail).font(Typography.callout).foregroundStyle(Palette.secondary).lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    if !transfers.isEmpty {
-                        Button { Task { await model.setAllPaused(!model.allPaused) } } label: {
-                            Icon(model.allPaused ? .sync : .pause, size: 14)
-                        }.buttonStyle(IconButtonStyle()).help(model.allPaused ? "Resume syncing" : "Pause syncing")
-                    }
-                    if !model.retainedWork.isEmpty {
-                        Button("Show Retained Work…", action: showRetainedWork).buttonStyle(CardButtonStyle())
-                    }
-                    if !model.loadIssues.isEmpty {
-                        Button("Saved Mount Issues…", action: showLoadIssues).buttonStyle(CardButtonStyle())
-                    }
-                }
-                .help(message.full)
-                if isWorking { ProgressBar(value: TransferFormat.fraction(transfers)) }
-            }
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 14)
-            .background(Palette.subtle)
-            .overlay(alignment: .top) { Hairline() }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: openActivity)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("Status")
-            .accessibilityAction(named: "Show Activity", openActivity)
+        ZStack {
+            if isWorking || recentResult != nil { strip }
         }
+        .task(id: log.latest?.id) {
+            guard let id = log.latest?.id else { return }
+            try? await Task.sleep(for: Self.resultDuration)
+            if !Task.isCancelled { expiredEntry = id }
+        }
+    }
+
+    private var strip: some View {
+        let message = message
+        return VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                if let icon = message.icon {
+                    Icon(icon, size: 14).foregroundStyle(isWorking ? Palette.accent : Palette.secondary)
+                } else {
+                    ProgressView().controlSize(.mini)
+                }
+                Text(message.title).font(Typography.bodyMedium).foregroundStyle(Palette.primary).lineLimit(1)
+                if let detail = message.detail, !detail.isEmpty {
+                    Text(detail).font(Typography.callout).foregroundStyle(Palette.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                if !transfers.isEmpty {
+                    Button { Task { await model.setAllPaused(!model.allPaused) } } label: {
+                        Icon(model.allPaused ? .sync : .pause, size: 14)
+                    }
+                    .buttonStyle(IconButtonStyle(size: 24, filled: true))
+                    .help(model.allPaused ? "Resume syncing" : "Pause syncing")
+                }
+            }
+            .help(message.full)
+            // Only measured transfers get a bar; operations without a total show the spinner.
+            if isWorking, let fraction = TransferFormat.fraction(transfers) {
+                ProgressBar(value: fraction)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 12)
+        .padding(.bottom, 14)
+        .background(Palette.subtle)
+        .overlay(alignment: .top) { Hairline() }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: openActivity)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Status")
+        .accessibilityAction(named: "Show Activity", openActivity)
     }
 }

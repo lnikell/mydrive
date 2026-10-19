@@ -42,8 +42,8 @@ Figma frames (node IDs, for `get_design_context`):
 - Mount list from `AppModel.drives`; status from `DriveModel.busy/status/isRegistered` and the new `DriveModel.monitorState`; "Last sync" from the new `DriveModel.lastChecked` (set when the monitor or a manual Refresh succeeds).
 - Row actions: Open in Finder (double-click, menu), Refresh, Free Up Space, Reconnect…, Disconnect… (eject button, menu, context menu) — the same `DriveAction`s and sheets as before.
 - Toolbar: filter (name, host, share, user, address, protocol), sort by name, Refresh all, Add menu → SMB share, Connect to URL… (parses `smb://` with `SMBAddress`, then opens the Add sheet prefilled).
-- Status strip: current operation or the latest result, Show Retained Work…, Saved Mount Issues….
-- Activity: operations in progress, mounts that need attention (with Reconnect…/Retry), saved-mount issues, retained work, and this session's completed operations (`ActivityLog`, built from the status messages the models already publish).
+- Status strip (the design's transfer strip): shown only while files transfer or a mount operation runs, then the result for 8 seconds before it hides. Measured transfers get a progress bar and a pause button; operations without a measurable total show a spinner. Problems are not shown here: they are in Activity › Needs attention, and settings errors appear in the Settings window.
+- Activity: operations in progress, mounts that need attention (with Reconnect…/Retry), saved-mount issues, unsynced changes saved on this Mac after a disconnect (the stored "retained work" locations), and this session's completed operations (`ActivityLog`, built from the status messages the models already publish).
 - Settings › General › Updates: Sparkle automatic checks, automatic download, Check Now, version and last check date.
 - Settings › Sync & Cache › Clear Cache…: runs Free Up Space on every registered mount (kept-downloaded files are skipped by `PolicyAwareEviction`).
 - Settings › Advanced › Remove All…: the existing disconnect-everything flow (`AppModel.prepareForUninstall`) in a "Remove All Mounts" mode without the quit step.

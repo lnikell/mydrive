@@ -34,7 +34,6 @@ enum RemovalMode: String, Identifiable {
                     Text(model.uninstall.currentDrive.map { "Disconnecting \($0)…" } ?? "Checking Finder drives…")
                         .font(Typography.body).foregroundStyle(Palette.primary)
                 }
-                ProgressBar(value: nil)
             } else if model.uninstall.ready {
                 Label {
                     Text(mode == .uninstall ? "All drives are disconnected. Ready to quit." : "All drives are disconnected.")
@@ -60,7 +59,7 @@ enum RemovalMode: String, Identifiable {
                 .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.separator, lineWidth: 1))
             }
             if !model.retainedWork.isEmpty {
-                Text("Retained Local Work").font(Typography.headline).foregroundStyle(Palette.primary)
+                Text("Unsynced changes saved on this Mac").font(Typography.headline).foregroundStyle(Palette.primary)
                 ScrollView {
                     VStack(spacing: 0) {
                         ForEach(model.retainedWork, id: \.self) { location in

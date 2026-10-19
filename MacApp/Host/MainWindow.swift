@@ -44,8 +44,7 @@ struct ConnectionSheetRequest: Identifiable {
             VStack(spacing: 0) {
                 content.frame(maxWidth: .infinity, maxHeight: .infinity)
                 if selection != .activity {
-                    StatusStrip(model: model, log: log, showRetainedWork: { showingRetainedWork = true },
-                                showLoadIssues: { showingLoadIssues = true }, openActivity: { selection = .activity })
+                    StatusStrip(model: model, log: log, openActivity: { selection = .activity })
                 }
             }
             .background(Palette.window)
@@ -53,7 +52,7 @@ struct ConnectionSheetRequest: Identifiable {
         .ignoresSafeArea()
         .background(Palette.window)
         .background(WindowChrome())
-        .frame(minWidth: 960, minHeight: 560)
+        .frame(minWidth: 1080, minHeight: 560)
     }
 
     private func lifecycle(_ view: some View) -> some View {
@@ -177,6 +176,7 @@ struct ConnectionSheetRequest: Identifiable {
 
     private var activityBadge: Int {
         model.drives.filter { $0.busy || $0.health.needsAttention }.count
+            + (model.loadIssues.isEmpty ? 0 : 1) + (model.retainedWork.isEmpty ? 0 : 1)
     }
 
     private var canPresent: Bool {
@@ -245,11 +245,11 @@ struct ConnectionSheetRequest: Identifiable {
             HStack(spacing: 12) {
                 IconTile(icon: .folder, size: 40, radius: 10)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Retained Local Work").font(Typography.title3).foregroundStyle(Palette.primary)
-                    Text("Kept when a mount was disconnected").font(Typography.callout).foregroundStyle(Palette.secondary)
+                    Text("Unsynced Changes").font(Typography.title3).foregroundStyle(Palette.primary)
+                    Text("Saved on this Mac when a mount was disconnected").font(Typography.callout).foregroundStyle(Palette.secondary)
                 }
             }
-            Text("Review these files before removing anything you still need.")
+            Text("These files had changes that weren't uploaded yet. Copy anything you still need back to the server before deleting them.")
                 .font(Typography.body).foregroundStyle(Palette.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {

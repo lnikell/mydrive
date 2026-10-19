@@ -136,7 +136,7 @@ private struct LocalCacheCard: View {
                     Text(cache.measuredAt == nil ? "—" : ByteCountFormatter.string(fromByteCount: cache.total, countStyle: .file))
                         .font(Typography.calloutMedium).foregroundStyle(Palette.primary)
                 }
-                ProgressBar(value: cache.measuredAt == nil ? nil : Double(cache.total) / max(1, limitGB * 1e9))
+                ProgressBar(value: cache.measuredAt == nil ? 0 : Double(cache.total) / max(1, limitGB * 1e9))
             }
             .padding(12)
             .background(RoundedRectangle(cornerRadius: 10, style: .continuous)

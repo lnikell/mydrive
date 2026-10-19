@@ -94,7 +94,7 @@ private enum Column {
     }
 
     private var header: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: TableLayout.columnGap) {
             Button { ascending.toggle() } label: {
                 HStack(spacing: 4) {
                     Text("Name")
@@ -132,7 +132,7 @@ private enum Column {
 
     var body: some View {
         let health = drive.health
-        HStack(spacing: 0) {
+        HStack(spacing: TableLayout.columnGap) {
             HStack(spacing: 12) {
                 DriveBadge(kind: drive.kind, size: 30)
                 VStack(alignment: .leading, spacing: 2) {
@@ -203,11 +203,14 @@ private enum Column {
     @ViewBuilder private func statusCell(_ health: MountHealth) -> some View {
         HStack(spacing: 8) {
             if case let .working(status) = health {
-                ProgressView().controlSize(.mini)
+                // Measured transfers show their progress; other work shows a spinner and its status.
                 if let fraction = TransferFormat.fraction(drive.snapshot?.transfers ?? []) {
-                    ProgressBar(value: fraction).frame(width: 60)
+                    ProgressBar(value: fraction).frame(width: 80)
                     Text("\(Int(fraction * 100)) %").foregroundStyle(Palette.primary)
-                } else { Text(status).foregroundStyle(Palette.primary) }
+                } else {
+                    ProgressView().controlSize(.mini)
+                    Text(status).foregroundStyle(Palette.primary)
+                }
             } else {
                 StatusDot(color: health.color)
                 Text(health.title).foregroundStyle(health.needsAttention ? health.color : Palette.primary)

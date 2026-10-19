@@ -32,6 +32,36 @@ enum SettingsTab: String, CaseIterable {
                 .tag(SettingsTab.advanced)
         }
         .frame(width: 640)
+        .overlay(alignment: .bottom) {
+            if let message = model.preferencesError {
+                SettingsProblem(message: message, dismiss: model.clearSettingsMessage)
+                    .padding(16)
+                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: model.preferencesError)
+    }
+}
+
+/// A settings change that could not be applied, shown where it happened.
+private struct SettingsProblem: View {
+    let message: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Icon(.warning, size: 14).foregroundStyle(Palette.red).alignmentGuide(.firstTextBaseline) { $0[.bottom] - 3 }
+            Text(message).font(Typography.callout).foregroundStyle(Palette.primary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("OK", action: dismiss).buttonStyle(CardButtonStyle())
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(RoundedRectangle(cornerRadius: 10, style: .continuous).fill(Palette.card))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.redSoft, lineWidth: 1))
+        .shadow(color: .black.opacity(0.18), radius: 12, y: 4)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -398,7 +428,7 @@ extension AppModel {
     private func speedRow(_ title: String, value: WritableKeyPath<UserPreferences, Double>, enabled: WritableKeyPath<UserPreferences, Bool>) -> some View {
         LabeledContent(title) {
             HStack(spacing: 6) {
-                BandwidthField(title: title, value: model.preference(value), report: model.report)
+                BandwidthField(title: title, value: model.preference(value), report: model.reportSettings)
                 Text("MB/s").font(Typography.callout).foregroundStyle(Palette.secondary)
                 Toggle("", isOn: model.preference(enabled)).labelsHidden().accessibilityLabel(title + " enabled")
             }

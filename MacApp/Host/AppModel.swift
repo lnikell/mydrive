@@ -31,6 +31,8 @@ struct DriveTransfer: Identifiable {
     private(set) var addFailure: (any Error)?
     private(set) var lastAddedID: String?
     private(set) var preferences = UserPreferences()
+    /// The last problem changing a setting, shown in the Settings window.
+    private(set) var preferencesError: String?
     private let preferencesStore: PreferencesStore?
     private let storage: Result<ConnectionStore, Error>
     private let backend: any DriveConnectionBackend
@@ -124,12 +126,21 @@ struct DriveTransfer: Identifiable {
     func updatePreference<Value>(_ key: WritableKeyPath<UserPreferences, Value>, _ value: Value) {
         var candidate = preferences
         candidate[keyPath: key] = value
+        guard (try? candidate.validated()) != nil else {
+            preferencesError = "That value is outside the allowed range, so the setting was not changed."
+            return
+        }
         do {
             guard let preferencesStore else { throw CocoaError(.fileWriteNoPermission) }
             try preferencesStore.save(candidate)
             preferences = candidate
-        } catch { status = "Preferences could not be saved: \(error.localizedDescription)" }
+            preferencesError = nil
+        } catch { preferencesError = "Settings couldn't be saved: \(error.localizedDescription)" }
     }
+
+    /// Settings problems are shown in the Settings window, next to the change.
+    func reportSettings(_ message: String) { preferencesError = message }
+    func clearSettingsMessage() { preferencesError = nil }
 
     func report(_ message: String) { status = message }
 

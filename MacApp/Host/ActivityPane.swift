@@ -4,11 +4,11 @@ import SwiftUI
 enum ActivityFilter: Hashable { case all, uploading, downloading, queued, issues }
 
 private enum Column {
-    static let mount: CGFloat = 150
-    static let progress: CGFloat = 190
-    static let speed: CGFloat = 90
-    static let status: CGFloat = 130
-    static let actions: CGFloat = 96
+    static let mount: CGFloat = 140
+    static let progress: CGFloat = 170
+    static let speed: CGFloat = 84
+    static let status: CGFloat = 124
+    static let actions: CGFloat = 104
 }
 
 /// File transfers, pending work and mount operations use the design's existing
@@ -128,7 +128,7 @@ private enum Column {
             if model.busy {
                 ActivityRow(icon: .sync, title: model.status.firstLine.isEmpty ? "Working…" : model.status.firstLine,
                             subtitle: "MyDrive", drive: nil, highlighted: true) {
-                    ProgressBar(value: nil).frame(width: 130)
+                    Text("—").foregroundStyle(Palette.tertiary)
                 } status: {
                     Label { Text("Working") } icon: { ProgressView().controlSize(.mini) }
                 } trailing: { EmptyView() }
@@ -136,7 +136,7 @@ private enum Column {
             ForEach(working) { drive in
                 ActivityRow(icon: .sync, title: drive.status.isEmpty ? "Working…" : drive.status.firstLine,
                             subtitle: drive.address, drive: drive, highlighted: true) {
-                    ProgressBar(value: nil).frame(width: 130)
+                    Text("—").foregroundStyle(Palette.tertiary)
                 } status: {
                     Label { Text("Working") } icon: { ProgressView().controlSize(.mini) }
                 } trailing: { EmptyView() }
@@ -179,15 +179,23 @@ private enum Column {
                 }
             }
             if !model.retainedWork.isEmpty {
-                ActivityRow(icon: .folder, title: "Retained local work",
+                // Edits that had not uploaded when a mount was disconnected; MyDrive saved them locally.
+                ActivityRow(icon: .folder, title: "Unsynced changes saved on this Mac",
                             subtitle: model.retainedWork.first?.path ?? "", drive: nil) {
-                    Text("\(model.retainedWork.count) \(model.retainedWork.count == 1 ? "location" : "locations")")
+                    Text("\(model.retainedWork.count) \(model.retainedWork.count == 1 ? "folder" : "folders")")
                         .foregroundStyle(Palette.tertiary)
                 } status: {
-                    Label { Text("Kept") } icon: { Icon(.info, size: 13) }.foregroundStyle(Palette.secondary)
+                    Label { Text("Review") } icon: { Icon(.info, size: 13) }.foregroundStyle(Palette.secondary)
                 } trailing: {
-                    Button("Show…", action: showRetainedWork).buttonStyle(CardButtonStyle(horizontalPadding: 9))
+                    if model.retainedWork.count == 1, let location = model.retainedWork.first {
+                        Button("Show") { NSWorkspace.shared.activateFileViewerSelecting([location]) }
+                            .buttonStyle(CardButtonStyle(horizontalPadding: 9))
+                            .help("Show in Finder")
+                    } else {
+                        Button("Show…", action: showRetainedWork).buttonStyle(CardButtonStyle(horizontalPadding: 9))
+                    }
                 }
+                .help("Changes that hadn't uploaded when a mount was disconnected. Copy anything you still need back to the server.")
             }
         }
         if filter == .all && (showingCompleted || inFlight > 0 || issueCount > 0) {
@@ -266,7 +274,9 @@ private enum Column {
                 Text(Array(Set(working.map(\.name) + activeTransfers.map { $0.drive.name })).sorted().joined(separator: ", ").ifEmpty("MyDrive"))
                     .font(Typography.callout).foregroundStyle(Palette.secondary).lineLimit(1)
             }
-            ProgressBar(value: TransferFormat.fraction(model.transfers.map(\.entry)), height: 6).frame(width: 220)
+            if let fraction = TransferFormat.fraction(model.transfers.map(\.entry)) {
+                ProgressBar(value: fraction, height: 6).frame(width: 220)
+            }
             Spacer(minLength: 0)
             Label { Text(TransferFormat.speed(activeTransfers.filter { $0.entry.direction == .uploading }.reduce(0) { $0 + $1.entry.bytesPerSecond })) } icon: { Icon(.arrowUp, size: 13) }
             Label { Text(TransferFormat.speed(activeTransfers.filter { $0.entry.direction == .downloading }.reduce(0) { $0 + $1.entry.bytesPerSecond })) } icon: { Icon(.arrowDown, size: 13) }
@@ -281,7 +291,7 @@ private enum Column {
     }
 
     private var header: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: TableLayout.columnGap) {
             Text("Name").frame(maxWidth: .infinity, alignment: .leading)
             Text("Mount").frame(width: Column.mount, alignment: .leading)
             Text("Progress").frame(width: Column.progress, alignment: .leading)
@@ -310,7 +320,7 @@ private struct ActivityRow<Progress: View, Status: View, Trailing: View>: View {
     @ViewBuilder let trailing: () -> Trailing
 
     var body: some View {
-        HStack(spacing: 0) {
+        HStack(spacing: TableLayout.columnGap) {
             HStack(spacing: 10) {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(Palette.control)

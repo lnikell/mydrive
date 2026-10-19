@@ -70,7 +70,7 @@ import SwiftUI
                     Button("Refresh", action: reload).buttonStyle(CardButtonStyle())
                 }
             } else {
-                HStack(spacing: 0) {
+                HStack(spacing: TableLayout.columnGap) {
                     Button { ascending.toggle() } label: {
                         HStack(spacing: 4) { Text("Name"); Icon(.chevronDown, size: 11).rotationEffect(.degrees(ascending ? 0 : 180)) }
                     }.buttonStyle(.plain).frame(maxWidth: .infinity, alignment: .leading)
@@ -112,7 +112,7 @@ import SwiftUI
     }
 
     private func fileRow(_ row: LibraryModel.Row) -> some View {
-        HStack(spacing: 0) {
+        HStack(spacing: TableLayout.columnGap) {
             HStack(spacing: 12) {
                 IconTile(icon: row.file.folder ? .folder : .doc, size: 30, radius: 6)
                 VStack(alignment: .leading, spacing: 2) {

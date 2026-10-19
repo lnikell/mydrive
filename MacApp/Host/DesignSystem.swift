@@ -314,6 +314,13 @@ struct StatusDot: View {
     var body: some View { Circle().fill(color).frame(width: 7, height: 7).accessibilityHidden(true) }
 }
 
+/// Shared table metrics. The gap keeps long values from running into the next column.
+enum TableLayout {
+    static let columnGap: CGFloat = 16
+}
+
+/// A track with a filled value. Pass `nil` only for work that is really under
+/// way but has no measurable total; prefer a spinner with text where possible.
 struct ProgressBar: View {
     var value: Double?
     var height: CGFloat = 4
@@ -333,6 +340,8 @@ struct ProgressBar: View {
                         Capsule().fill(tint)
                             .frame(width: width)
                             .offset(x: (proxy.size.width + width) * phase - width)
+                            // Span the whole track so the sweep is not clipped to its own width.
+                            .frame(width: proxy.size.width, alignment: .leading)
                     }
                     .clipShape(Capsule())
                 }
