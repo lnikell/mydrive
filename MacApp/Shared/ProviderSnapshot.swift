@@ -74,7 +74,7 @@ struct TransferEntry: Codable, Identifiable, Equatable, Sendable {
     var resolved = false
     var path: String?
     var active: Bool { state == .queued || state == .transferring }
-    var fraction: Double? { total > 0 ? min(1, Double(completed) / Double(total)) : nil }
+    var fraction: Double? { state == .completed ? 1 : (total > 0 ? min(1, Double(completed) / Double(total)) : nil) }
 
     func validated() throws -> Self {
         guard !itemID.isEmpty, itemID.utf8.count <= 128, name.utf8.count <= 1024, message.utf8.count <= 2048,

@@ -3,11 +3,12 @@ import Foundation
 import MyDriveCore
 
 enum MutationTests {
-    static func fixture(_ root: URL, _ peer: MutationPeer, check: (@Sendable () async throws -> Void)? = nil) throws -> ProviderMutations {
+    static func fixture(_ root: URL, _ peer: MutationPeer, check: (@Sendable () async throws -> Void)? = nil,
+                        prepared: @escaping @Sendable (String, String?, Int64?) async -> Void = { _, _, _ in }) throws -> ProviderMutations {
         ProviderMutations(catalog: try Catalog(databaseURL: root.appendingPathComponent("catalog.sqlite")),
             staging: try MutationStaging(root: root.appendingPathComponent("Mutations")),
             remote: MutationRemote(stat: { await peer.stat($0) }, mutate: { try await peer.mutate($0, $1, $2) }),
-            checkActive: check ?? { try Task.checkCancellation() })
+            checkActive: check ?? { try Task.checkCancellation() }, preparedTransfer: prepared)
     }
 
     static func run() async throws -> Int {

@@ -131,18 +131,25 @@ private actor ActiveTransfers {
         let url = root.appendingPathComponent("activity.json"), progress = Progress(totalUnitCount: 1)
         let ledger = TransferLedger(url: url)
         let empty = ledger.begin(itemID: "empty", name: "Empty.txt", direction: .downloading, progress: progress, expectedBytes: 0)
-        try check(ledger.snapshot().first?.total == 0, "Preparing an empty file guessed a nonzero byte count")
+        try check(ledger.snapshot().first?.total == 0 && ledger.snapshot().first?.fraction == nil,
+            "Preparing an empty file guessed a byte count or claimed completion")
         progress.completedUnitCount = 1
         ledger.finish(empty, bytes: 0)
-        let failed = ledger.begin(itemID: "file", name: "File.txt", direction: .uploading, progress: progress)
+        let failed = ledger.begin(itemID: "first-template", name: "File.txt", direction: .uploading, progress: progress)
+        ledger.prepared(failed, itemID: "file", path: "Folder/File.txt", bytes: 42)
+        try check(ledger.snapshot().last?.itemID == "file" && ledger.snapshot().last?.total == 42 &&
+            TransferLedger(url: url).snapshot().last?.path == "Folder/File.txt",
+            "Prepared upload identity and length were not visible and durable before completion")
         ledger.finish(failed, error: CocoaError(.fileWriteUnknown))
-        let retry = ledger.begin(itemID: "file", name: "File.txt", direction: .uploading, progress: progress)
+        let retry = ledger.begin(itemID: "retry-template", name: "File.txt", direction: .uploading, progress: progress)
+        ledger.prepared(retry, itemID: "file", path: "Folder/File.txt", bytes: 42)
         ledger.finish(retry, bytes: 42)
         let conflict = ledger.begin(itemID: "conflict", name: "Conflict.txt", direction: .uploading, progress: progress)
         ledger.finish(conflict, conflict: true, bytes: 10)
         ledger.resolve(conflict)
         let entries = TransferLedger(url: url).snapshot()
-        try check(entries.first?.total == 0 && entries.first?.completed == 0, "An empty file was displayed as one byte")
+        try check(entries.first?.total == 0 && entries.first?.completed == 0 && entries.first?.fraction == 1,
+            "A completed empty file was displayed as one byte or still in progress")
         try check(entries.first(where: { $0.id == failed })?.resolved == true && entries.first(where: { $0.id == retry })?.total == 42,
                   "Successful retry did not resolve prior failure or save the verified byte count")
         try check(entries.first(where: { $0.id == conflict })?.resolved == true, "Reviewed conflict was not acknowledged durably")

@@ -13,15 +13,18 @@ struct ProviderMutations: Sendable {
     let packageRegistryAvailable: @Sendable () -> Bool
     let preferences: @Sendable () async throws -> UserPreferences
     let transferActivity: @Sendable (TreeTransferEvent) async -> Void
+    let preparedTransfer: @Sendable (String, String?, Int64?) async -> Void
 
     init(catalog: Catalog, staging: MutationStaging, remote: MutationRemote,
          checkActive: @escaping @Sendable () async throws -> Void,
          packageRegistryAvailable: @escaping @Sendable () -> Bool = MutationRepresentationPolicy.registryIsAvailable,
          preferences: @escaping @Sendable () async throws -> UserPreferences = { UserPreferences() },
-         transferActivity: @escaping @Sendable (TreeTransferEvent) async -> Void = { _ in }) {
+         transferActivity: @escaping @Sendable (TreeTransferEvent) async -> Void = { _ in },
+         preparedTransfer: @escaping @Sendable (String, String?, Int64?) async -> Void = { _, _, _ in }) {
         self.catalog = catalog; self.staging = staging; self.remote = remote
         self.checkActive = checkActive; self.packageRegistryAvailable = packageRegistryAvailable
         self.preferences = preferences; self.transferActivity = transferActivity
+        self.preparedTransfer = preparedTransfer
     }
 
     func write(_ requested: MutationInput, create: Bool, progress: Progress) async throws -> CatalogItem {
@@ -123,6 +126,8 @@ struct ProviderMutations: Sendable {
         guard try await catalog.treeImportOwner(operationKey: key) == nil else {
             throw MutationInput.unsupported("This change belongs to a pending whole-folder import. Its local contents and recovery records are preserved.")
         }
+        await preparedTransfer(operation.intent.itemID, operation.intent.destinationPath ?? operation.intent.sourcePath,
+                               operation.intent.payload?.size)
         if let result = try await catalog.mutationResult(key: key) {
             if var plan = try staging.load(key) { await cleanup(plan: &plan) }
             progress.completedUnitCount = progress.totalUnitCount

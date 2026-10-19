@@ -74,6 +74,7 @@ struct ProviderTreeImport: Sendable {
             status = try await prepare(input, rootID: rootID, key: key, snapshot: candidate, saveContract: saveContract)
         }
         guard var current = status else { throw SMBClientError.invalidResponse }
+        await mutations.preparedTransfer(current.rootID, current.destinationPath, nil)
         let aggregate = try TreeWorkProgress.configure(progress, tree: current.tree)
         if current.phase == .published { return try await complete(current, progress: progress) }
         let snapshot = try LocalTreeSnapshot.load(current.tree, in: mutations.staging)

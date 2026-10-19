@@ -398,13 +398,48 @@ extension AppModel {
     private func speedRow(_ title: String, value: WritableKeyPath<UserPreferences, Double>, enabled: WritableKeyPath<UserPreferences, Bool>) -> some View {
         LabeledContent(title) {
             HStack(spacing: 6) {
-                TextField("", value: model.preference(value), format: .number.precision(.fractionLength(0...1)))
-                    .frame(width: 56).multilineTextAlignment(.trailing).accessibilityLabel(title)
+                BandwidthField(title: title, value: model.preference(value), report: model.report)
                 Text("MB/s").font(Typography.callout).foregroundStyle(Palette.secondary)
                 Toggle("", isOn: model.preference(enabled)).labelsHidden().accessibilityLabel(title + " enabled")
             }
             .accessibilityElement(children: .contain)
         }
+    }
+}
+
+/// Editing a fractional value passes through empty/zero text. Persist only the
+/// finished value, so normal localized typing never reports a storage failure.
+@MainActor private struct BandwidthField: View {
+    let title: String
+    @Binding var value: Double
+    let report: (String) -> Void
+    @State private var draft: String
+    @FocusState private var focused: Bool
+
+    init(title: String, value: Binding<Double>, report: @escaping (String) -> Void) {
+        self.title = title; self._value = value; self.report = report
+        self._draft = State(initialValue: value.wrappedValue.formatted(.number.precision(.fractionLength(0...1))))
+    }
+
+    var body: some View {
+        TextField("", text: $draft)
+            .frame(width: 56).multilineTextAlignment(.trailing).accessibilityLabel(title)
+            .focused($focused)
+            .onSubmit(commit)
+            .onChange(of: focused) { _, active in if !active { commit() } }
+            .onChange(of: value) { _, updated in
+                if !focused { draft = updated.formatted(.number.precision(.fractionLength(0...1))) }
+            }
+            .onDisappear(perform: commit)
+    }
+
+    private func commit() {
+        if let number = try? Double(draft, format: .number), number.isFinite, (0.1...10000).contains(number) {
+            if number != value { value = number }
+        } else {
+            report("Enter a speed between 0.1 and 10,000 MB/s.")
+        }
+        draft = value.formatted(.number.precision(.fractionLength(0...1)))
     }
 }
 

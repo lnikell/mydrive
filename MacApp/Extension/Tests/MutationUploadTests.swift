@@ -3,6 +3,11 @@ import Foundation
 import MyDriveCore
 import Darwin
 
+private actor PreparedUploadObservation {
+    var values: [(String, String?, Int64?, Int)] = []
+    func record(_ id: String, _ path: String?, _ bytes: Int64?, calls: Int) { values.append((id, path, bytes, calls)) }
+}
+
 extension MutationTests {
     static func creationReplay() async throws -> Int {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -13,15 +18,22 @@ extension MutationTests {
         try bytes.write(to: source)
         let template = WriteTemplate(id: "os-stable-template", name: "New.txt")
         let input = try MutationInput(item: template, fields: [.filename, .parentItemIdentifier, .contents], contents: source)
+        try mutationCheck(input.contentByteCount == Int64(bytes.count), "Queued upload guessed SDK progress units instead of source bytes")
 
-        let peer = MutationPeer()
-        let recovery = try fixture(root.appendingPathComponent("recovery"), peer)
+        let peer = MutationPeer(), observed = PreparedUploadObservation()
+        let recovery = try fixture(root.appendingPathComponent("recovery"), peer, prepared: { id, path, bytes in
+            await observed.record(id, path, bytes, calls: peer.counts().2)
+        })
         await peer.loseReply()
         do {
             _ = try await recovery.write(input, create: true, progress: Progress(totalUnitCount: 1))
             throw MutationTestFailure(message: "Lost reply was acknowledged as committed")
         } catch SMBClientError.serverUnreachable {}
         let staged = try await recovery.catalog.replayableOperations()
+        let preparation = await observed.values
+        try mutationCheck(preparation.count == 1 && preparation[0].0 == staged[0].intent.itemID && preparation[0].0 != input.id &&
+            preparation[0].1 == "New.txt" && preparation[0].2 == Int64(bytes.count) && preparation[0].3 == 0,
+            "Canonical identity and bytes were not observed before the failed remote upload")
         try mutationCheck(staged.count == 1 && staged[0].state == .uncertain, "Uncertain upload was not durable")
         try mutationCheck(FileManager.default.fileExists(atPath: recovery.staging.payloadURL(staged[0].intent.payload!.id).path),
                           "Uncertain callback discarded its only durable payload")

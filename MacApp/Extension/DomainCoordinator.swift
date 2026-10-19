@@ -330,7 +330,7 @@ actor DomainCoordinator {
                 try checkActive()
             }
             activity.finish(activityID, bytes: downloaded.size)
-            try? await catalog.recordTransfer(itemID: id, version: original.model.entry.contentVersion,
+            try? await catalog.recordTransfer(itemID: id, version: "fetch:" + activityID.uuidString,
                 upload: false, bytes: downloaded.size)
             return (temporary, original)
         } catch {
@@ -345,10 +345,11 @@ actor DomainCoordinator {
         let parentPath = try? await catalog.relativePath(id: input.parentID)
         let displayPath = parentPath.map { ProviderMutations.join($0, input.filename) }
         let activityID = activity.begin(itemID: input.id, name: input.filename,
-            direction: input.contents == nil || input.kind != .file ? .operation : .uploading, progress: progress, path: displayPath)
+            direction: input.contents == nil || input.kind != .file ? .operation : .uploading, progress: progress,
+            expectedBytes: input.contents != nil && input.kind == .file ? (input.contentByteCount ?? 0) : nil, path: displayPath)
         do {
             let result = try await operationGate.perform {
-                try await self.performWrite(input, create: create, progress: progress)
+                try await self.performWrite(input, create: create, progress: progress, activityID: activityID)
             }
             activity.finish(activityID, name: result.filename, itemID: result.model.id,
                             conflict: result.filename != input.filename, bytes: result.model.entry.size)
@@ -365,12 +366,12 @@ actor DomainCoordinator {
         }
     }
 
-    private func performWrite(_ input: MutationInput, create: Bool, progress: Progress) async throws -> ProviderItem {
+    private func performWrite(_ input: MutationInput, create: Bool, progress: Progress, activityID: UUID) async throws -> ProviderItem {
         try checkActive()
         let parentPath = try await catalog.relativePath(id: input.parentID)
         try checkExcluded([parentPath, input.filename].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: "/"))
         let result: CatalogItem
-        do { result = try await mutationAdapter().write(input, create: create, progress: progress) }
+        do { result = try await mutationAdapter(activityID: activityID).write(input, create: create, progress: progress) }
         catch { await recordMutationFailure(error); throw error }
         if !create, input.hasOnlyUnsupportedMetadata {
             let item = try await providerItem(result)
@@ -428,12 +429,19 @@ actor DomainCoordinator {
         await recordMutationPublication()
     }
 
-    private func mutationAdapter() -> ProviderMutations {
+    private func mutationAdapter(activityID: UUID? = nil) -> ProviderMutations {
         ProviderMutations(catalog: catalog, staging: mutationStaging,
                           remote: MutationRemote(client: { try await self.operationClient() }),
                           checkActive: { try await self.checkActive() },
                           preferences: { try await self.currentPreferences() },
-                          transferActivity: { event in await self.observeTreeTransfer(event) })
+                          transferActivity: { event in await self.observeTreeTransfer(event) },
+                          preparedTransfer: { itemID, path, bytes in
+                              if let activityID { await self.observePreparedTransfer(activityID, itemID: itemID, path: path, bytes: bytes) }
+                          })
+    }
+
+    private func observePreparedTransfer(_ id: UUID, itemID: String, path: String?, bytes: Int64?) {
+        activity.prepared(id, itemID: itemID, path: path, bytes: bytes)
     }
 
     private func observeTreeTransfer(_ event: TreeTransferEvent) {

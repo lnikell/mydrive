@@ -15,6 +15,18 @@ import Testing
         #expect(totals.files == 3 && totals.uploaded == 142 && totals.downloaded == 42)
     }
 
+    @Test func repeatedHydrationsCountSeparateFetchesButNotReceiptReplay() async throws {
+        let fixture = try Fixture(), now = fixtureDate()
+        let first = "fetch:10801CB9-8C3A-41B0-A4EC-34BEF74B3E9D"
+        let second = "fetch:F2FF7E56-A3B8-4B64-9A89-382DE8AF6D20"
+        try await fixture.catalog.recordTransfer(itemID: "same-revision", version: first, upload: false, bytes: 720000, date: now)
+        let reopened = try Catalog(databaseURL: fixture.url)
+        try await reopened.recordTransfer(itemID: "same-revision", version: first, upload: false, bytes: 720000, date: now)
+        try await reopened.recordTransfer(itemID: "same-revision", version: second, upload: false, bytes: 720000, date: now)
+        let totals = try await fixture.catalog.transferTotals(date: now)
+        #expect(totals.files == 2 && totals.downloaded == 1440000 && totals.uploaded == 0)
+    }
+
     @Test func countsRespectInheritedSelectionsAndRemovedAncestors() async throws {
         let fixture = try Fixture(), catalog = fixture.catalog
         func publish(_ entries: [RemoteEntry], parent: String = Catalog.rootID) async throws {

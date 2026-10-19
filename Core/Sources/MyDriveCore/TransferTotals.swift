@@ -8,8 +8,10 @@ public struct DailyTransferTotals: Codable, Equatable, Sendable {
 }
 
 extension Catalog {
-    /// A retried native callback for the same verified content is counted once
-    /// per direction/day. Counters survive history clearing and provider restart.
+    /// `version` is a verified transfer receipt: uploads use their committed
+    /// content revision to deduplicate journal replay; downloads use a fresh
+    /// fetch identity so a later hydration of the same revision counts again.
+    /// Replaying one receipt is idempotent across history clearing and restart.
     public func recordTransfer(itemID: String, version: String, upload: Bool, bytes: Int64, date: Date = Date()) throws {
         guard bytes >= 0, !itemID.isEmpty, !version.isEmpty, itemID.utf8.count <= 128, version.utf8.count <= 512,
               date.timeIntervalSinceReferenceDate.isFinite else { throw CatalogError.invalidEntry }

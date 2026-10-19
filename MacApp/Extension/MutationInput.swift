@@ -3,6 +3,7 @@ import Foundation
 import UniformTypeIdentifiers
 import MyDriveCore
 import CryptoKit
+import Darwin
 
 /// Snapshot Objective-C templates before handing the operation to a task.
 /// These are requested values, never a claim that their bytes are uploaded.
@@ -60,6 +61,16 @@ struct MutationInput: Sendable {
     }
 
     var pendingFields: NSFileProviderItemFields { fields.subtracting(Self.supportedFields) }
+
+    /// Metadata only: queued callbacks must not read or materialize their bytes.
+    /// Staging supplies the authoritative length after preparation.
+    var contentByteCount: Int64? {
+        guard kind == .file, let contents else { return nil }
+        var metadata = stat()
+        guard lstat(contents.path, &metadata) == 0,
+              metadata.st_mode & S_IFMT == S_IFREG, metadata.st_size >= 0 else { return nil }
+        return metadata.st_size
+    }
 
     static func validateName(_ name: String) throws {
         guard !name.isEmpty, name != ".", name != "..", name.utf8.count <= 255,

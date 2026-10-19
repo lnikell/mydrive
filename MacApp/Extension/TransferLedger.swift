@@ -5,7 +5,7 @@ import Foundation
 final class TransferLedger {
     private struct Running {
         let progress: Progress
-        let expectedBytes: Int64?
+        var expectedBytes: Int64?
         var lastBytes: Int64
         var lastSample: Date
     }
@@ -57,6 +57,21 @@ final class TransferLedger {
         }
         records[index].message = String((error?.localizedDescription ?? (conflict ? "Conflict resolved by keeping both copies." : "Finished")).prefix(512))
         EventLog.record(error == nil ? "transfer_completed" : "transfer_failed", error: error, verbose: error == nil)
+        trimAndSave()
+    }
+
+    /// Preparation binds a create template to its durable identity before any
+    /// upload starts. Keep the same activity so journal projections and retries
+    /// refer to one item, including when the eventual remote operation fails.
+    func prepared(_ id: UUID, itemID: String, path: String?, bytes: Int64?) {
+        guard let index = records.firstIndex(where: { $0.id == id }), var task = running[id] else { return }
+        records[index].itemID = itemID
+        if let path { records[index].path = path }
+        if let bytes {
+            task.expectedBytes = max(0, bytes)
+            records[index].total = max(0, bytes)
+        }
+        running[id] = task
         trimAndSave()
     }
 
